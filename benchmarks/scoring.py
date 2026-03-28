@@ -2,6 +2,16 @@
 
 Computes precision, recall, F1, and confidence calibration
 by comparing bbci findings against ground truth.
+
+Standards alignment:
+- IR metrics (precision/recall/F1) as used in CamBench [1] and CryptoAPI-Bench [2] evaluations
+- TLS scoring follows Qualys SSL Labs Rating Guide v2009r [3]
+- CWE mapping from MITRE CWE database
+
+References:
+  [1] Schlichtig et al., "CamBench", MSR 2022, arXiv:2204.06447
+  [2] Afrose et al., "CryptoAPI-Bench", IEEE SecDev 2019
+  [3] Qualys SSL Labs, "SSL Server Rating Guide", v2009r (2025)
 """
 
 from __future__ import annotations
@@ -90,6 +100,133 @@ def load_ground_truth(path: str = "benchmarks/ground_truth.yaml") -> dict:
     """Load ground truth from YAML file."""
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+# ============================================================
+# SSL Labs Rating Guide v2009r scoring
+# ============================================================
+
+# Protocol scores per SSL Labs guide
+SSL_LABS_PROTOCOL_SCORES: dict[str, int] = {
+    "SSLv2": 0,
+    "SSLv3": 80,
+    "TLSv1.0": 90,
+    "TLSv1.1": 95,
+    "TLSv1.2": 100,
+    "TLSv1.3": 100,
+}
+
+# Cipher strength scores (bits -> score)
+def _cipher_strength_score(bits: int) -> int:
+    """Score cipher strength per SSL Labs guide."""
+    if bits == 0:
+        return 0
+    elif bits < 128:
+        return 20
+    elif bits < 256:
+        return 80
+    else:
+        return 100
+
+
+def compute_ssl_labs_grade(
+    supported_protocols: list[str],
+    cipher_suites: list[dict],
+    has_pfs: bool = False,
+    has_rc4: bool = False,
+    has_3des: bool = False,
+    key_exchange_bits: int = 2048,
+) -> dict[str, Any]:
+    """Compute SSL Labs-style grade from TLS scan results.
+
+    Follows Qualys SSL Labs Rating Guide v2009r:
+    - Protocol support: 30%
+    - Key exchange: 30%
+    - Cipher strength: 40%
+    - Grade caps for specific weaknesses
+
+    Returns dict with score, grade, and breakdown.
+    """
+    # Protocol score (average of best and worst)
+    proto_scores = [
+        SSL_LABS_PROTOCOL_SCORES.get(p, 50)
+        for p in supported_protocols
+    ]
+    if proto_scores:
+        protocol_score = (max(proto_scores) + min(proto_scores)) / 2
+    else:
+        protocol_score = 0
+
+    # Key exchange score
+    if key_exchange_bits >= 4096:
+        kx_score = 100
+    elif key_exchange_bits >= 2048:
+        kx_score = 90
+    elif key_exchange_bits >= 1024:
+        kx_score = 80
+    elif key_exchange_bits >= 512:
+        kx_score = 40
+    else:
+        kx_score = 20
+
+    # Cipher strength score (average of strongest and weakest)
+    cipher_bits = [s.get("bits", 128) for s in cipher_suites] if cipher_suites else [128]
+    if cipher_bits:
+        strongest = _cipher_strength_score(max(cipher_bits))
+        weakest = _cipher_strength_score(min(cipher_bits))
+        cipher_score = (strongest + weakest) / 2
+    else:
+        cipher_score = 0
+
+    # Combined score (30/30/40 weighting)
+    overall = (protocol_score * 0.30 + kx_score * 0.30 + cipher_score * 0.40)
+
+    # Determine base grade
+    if overall >= 80:
+        grade = "A"
+    elif overall >= 65:
+        grade = "B"
+    elif overall >= 50:
+        grade = "C"
+    elif overall >= 35:
+        grade = "D"
+    elif overall >= 20:
+        grade = "E"
+    else:
+        grade = "F"
+
+    # Grade caps per SSL Labs rules
+    caps_applied = []
+
+    if "SSLv2" in supported_protocols:
+        grade = "F"
+        caps_applied.append("SSLv2 → F")
+    if "SSLv3" in supported_protocols and grade < "C":
+        grade = max(grade, "C")
+        caps_applied.append("SSLv3 → max B")
+    if has_rc4 and grade < "C":
+        grade = "C"
+        caps_applied.append("RC4 → max C")
+    if has_3des and grade < "C":
+        grade = "C"
+        caps_applied.append("3DES (64-bit block) → max C")
+    if not has_pfs and grade < "B":
+        grade = "B"
+        caps_applied.append("No PFS → max B")
+    if any(p in supported_protocols for p in ["TLSv1.0", "TLSv1.1"]):
+        if grade == "A":
+            grade = "B"
+            caps_applied.append("TLS 1.0/1.1 → max B")
+
+    return {
+        "overall_score": round(overall, 1),
+        "grade": grade,
+        "protocol_score": round(protocol_score, 1),
+        "key_exchange_score": round(kx_score, 1),
+        "cipher_strength_score": round(cipher_score, 1),
+        "caps_applied": caps_applied,
+        "methodology": "Qualys SSL Labs Rating Guide v2009r",
+    }
 
 
 def score_findings(

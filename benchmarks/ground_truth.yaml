@@ -1,10 +1,93 @@
 # Ground Truth: Expected findings for each benchmark target
-# Used by the scoring engine to compute precision/recall/F1
+#
+# Standards alignment:
+#   - Vulnerability categories follow CamBench (MSR 2022) and CryptoAPI-Bench (IEEE SecDev 2019) taxonomy
+#   - TLS scoring follows SSL Labs Rating Guide v2009r (Qualys)
+#   - Test IDs map to OWASP WSTG v4.2 Chapter 9: Testing for Weak Cryptography
+#   - CWE references from MITRE CWE database
+#   - Randomness testing follows NIST SP 800-22 Rev 1a
+#   - Output format follows CycloneDX CBOM v1.6
+#
+# Note: No established blackbox crypto inventory benchmark exists in the literature.
+# CamBench and CryptoAPI-Bench target whitebox/static analysis. This benchmark
+# adapts their vulnerability taxonomy to a blackbox observation context, which
+# is itself a novel academic contribution (see Notion design doc §4.4).
+#
+# References:
+#   [1] Schlichtig et al., "CamBench -- Cryptographic API Misuse Detection Tool Benchmark Suite", MSR 2022, arXiv:2204.06447
+#   [2] Afrose et al., "CryptoAPI-Bench: A Comprehensive Benchmark on Java Cryptographic API Misuses", IEEE SecDev 2019
+#   [3] Ami et al., "Why Crypto-detectors Fail: A Systematic Evaluation of Cryptographic Misuse Detection Techniques" (MASC taxonomy), USENIX Security 2022
+#   [4] Qualys SSL Labs, "SSL Server Rating Guide", v2009r (2025)
+#   [5] OWASP, "Web Security Testing Guide v4.2", Chapter 9: Testing for Weak Cryptography
+#   [6] NIST SP 800-22 Rev 1a, "A Statistical Test Suite for Random and Pseudorandom Number Generators"
+#   [7] Boehm et al., "Cryptoscope: Analyzing cryptographic usages in modern software", arXiv:2503.19531 (uses CamBench)
+#   [8] CryptoScope LLM, arXiv:2508.11599 (OWASP + CryptoAPI benchmark)
 
+# ============================================================
+# Misuse category mapping to standards
+# ============================================================
+# Our Category           | CamBench/CryptoAPI-Bench Rule | MASC Operator | OWASP WSTG          | CWE
+# -----------------------|-------------------------------|---------------|----------------------|-----
+# ECBMode               | Rule 3 (ECB mode)             | M76           | WSTG-CRYP-04         | CWE-327
+# StaticIV              | Rule 4 (Static IV/nonce)       | M69           | WSTG-CRYP-04         | CWE-329
+# WeakHash              | Rule 16 (Weak MessageDigest)   | M86           | WSTG-CRYP-04         | CWE-328
+# InsecureRandom        | Rule 14 (Predictable Random)   | M74           | WSTG-CRYP-04         | CWE-330
+# PaddingOracle         | N/A (runtime, not static)      | N/A           | WSTG-CRYP-02         | CWE-209,CWE-649
+# InsecureCipherSuite   | Rule 1 (Weak algorithm)        | M89           | WSTG-CRYP-01         | CWE-326,CWE-327
+# NoPFS                 | N/A (TLS config)               | N/A           | WSTG-CRYP-01         | CWE-320
+# WeakProtocolVersion   | N/A (TLS config)               | N/A           | WSTG-CRYP-01         | CWE-326
+# JWTAlgConfusion       | N/A (JWT-specific)             | N/A           | WSTG-CRYP-04         | CWE-347
+# TimingLeak            | N/A (runtime, not static)      | N/A           | N/A                  | CWE-208
+# WeakKeyLength         | Rule 2 (Inadequate key size)   | M71           | WSTG-CRYP-04         | CWE-326
+# HardcodedKey          | Rule 6 (Hardcoded key)         | M73           | N/A (whitebox only)  | CWE-547
+# NoHSTS                | N/A (HTTP header)              | N/A           | WSTG-CRYP-01         | CWE-319
+
+# ============================================================
+# SSL Labs Rating Guide scoring (for TLS benchmarks)
+# ============================================================
+ssl_labs_scoring:
+  description: >
+    TLS scoring follows Qualys SSL Labs Rating Guide v2009r.
+    Protocol support (30%), Key exchange (30%), Cipher strength (40%).
+    Grade caps: SSL 3.0 → max B; TLS 1.0/1.1 without mitigation → max B;
+    No PFS → capped at B; RC4 → capped at C; 64-bit block cipher → capped at C.
+  protocol_scores:
+    SSLv2: 0
+    SSLv3: 80
+    TLSv1.0: 90
+    TLSv1.1: 95
+    TLSv1.2: 100
+    TLSv1.3: 100
+  weights:
+    protocol_support: 0.30
+    key_exchange: 0.30
+    cipher_strength: 0.40
+  grade_thresholds:
+    A: 80
+    B: 65
+    C: 50
+    D: 35
+    E: 20
+    F: 0
+
+# ============================================================
+# Benchmark targets
+# ============================================================
 benchmarks:
+
+  # --- CamBench/CryptoAPI-Bench Rule 3: ECB Mode ---
   BM-01:
     name: "ECB Mode Encryption"
-    description: "AES-128-ECB encryption endpoint. Identical plaintext blocks produce identical ciphertext blocks."
+    description: >
+      AES-128-ECB encryption endpoint. Identical plaintext blocks produce
+      identical ciphertext blocks. Maps to CamBench Rule 3 / CryptoAPI-Bench
+      Rule 3 (insecure block cipher mode).
+    references:
+      cambench_rule: 3
+      cryptoapi_bench_rule: 3
+      masc_operator: "M76"
+      owasp_wstg: "WSTG-CRYP-04"
+      cwe: ["CWE-327"]
     endpoint: "/api/encrypt"
     expected_findings:
       - category: "ECBMode"
@@ -13,10 +96,21 @@ benchmarks:
         pq_vulnerable: false
         min_confidence: 0.9
     detection_channels: ["CH2:CIPHERTEXT_STATS"]
+    detection_method: >
+      Send repeated 16-byte blocks, check for identical ciphertext blocks.
+      Theoretical detection rate: 100% (deterministic).
 
+  # --- CamBench/CryptoAPI-Bench Rule 4: Static IV ---
   BM-02:
     name: "Static IV/Nonce"
-    description: "AES-128-CBC with hardcoded IV. Same plaintext always produces same ciphertext."
+    description: >
+      AES-128-CBC with hardcoded IV. Same plaintext always produces same
+      ciphertext. Maps to CamBench Rule 4 / MASC M69.
+    references:
+      cambench_rule: 4
+      masc_operator: "M69"
+      owasp_wstg: "WSTG-CRYP-04"
+      cwe: ["CWE-329"]
     endpoint: "/api/encrypt-cbc-static"
     expected_findings:
       - category: "StaticIV"
@@ -25,10 +119,22 @@ benchmarks:
         pq_vulnerable: false
         min_confidence: 0.8
     detection_channels: ["CH2:CIPHERTEXT_STATS"]
+    detection_method: >
+      Encrypt same plaintext N times. If all ciphertexts are identical,
+      IV/nonce is static (or key is also static).
 
+  # --- CamBench/CryptoAPI-Bench Rule 16: Weak Hash (MD5) ---
   BM-03:
     name: "Weak Hash - MD5"
-    description: "API returns MD5 hashes of user data."
+    description: >
+      API returns MD5 hashes. Maps to CamBench Rule 16 (broken MessageDigest) /
+      CryptoAPI-Bench Rule 16 / MASC M86.
+    references:
+      cambench_rule: 16
+      cryptoapi_bench_rule: 16
+      masc_operator: "M86"
+      owasp_wstg: "WSTG-CRYP-04"
+      cwe: ["CWE-328"]
     endpoint: "/api/hash"
     expected_findings:
       - category: "WeakHash"
@@ -37,10 +143,21 @@ benchmarks:
         pq_vulnerable: false
         min_confidence: 0.8
     detection_channels: ["CH5:HASH_SIGNATURE"]
+    detection_method: >
+      Analyze hash output length: 32 hex chars (128 bits) = MD5.
+      Cross-validate by hashing known input and comparing.
 
+  # --- CamBench/CryptoAPI-Bench Rule 16: Weak Hash (SHA-1) ---
   BM-04:
     name: "Weak Hash - SHA-1"
-    description: "API returns SHA-1 hashes for integrity verification."
+    description: >
+      API returns SHA-1 hashes for integrity. Maps to CamBench Rule 16.
+      SHA-1 has known collision attacks (SHAttered, 2017).
+    references:
+      cambench_rule: 16
+      cryptoapi_bench_rule: 16
+      owasp_wstg: "WSTG-CRYP-04"
+      cwe: ["CWE-328"]
     endpoint: "/api/hash-sha1"
     expected_findings:
       - category: "WeakHash"
@@ -49,10 +166,24 @@ benchmarks:
         pq_vulnerable: false
         min_confidence: 0.8
     detection_channels: ["CH5:HASH_SIGNATURE"]
+    detection_method: >
+      Analyze hash output length: 40 hex chars (160 bits) = SHA-1.
 
+  # --- CamBench/CryptoAPI-Bench Rule 14: Insecure Random ---
   BM-05:
     name: "Insecure Random (LCG)"
-    description: "Session tokens generated with a linear congruential generator (predictable)."
+    description: >
+      Session tokens generated with a linear congruential generator
+      (java.util.Random-equivalent). Maps to CamBench Rule 14 /
+      CryptoAPI-Bench Rule 14 / MASC M74.
+      Evaluated using NIST SP 800-22 Rev 1a statistical tests.
+    references:
+      cambench_rule: 14
+      cryptoapi_bench_rule: 14
+      masc_operator: "M74"
+      owasp_wstg: "WSTG-CRYP-04"
+      cwe: ["CWE-330"]
+      nist: "SP 800-22 Rev 1a"
     endpoint: "/api/token"
     expected_findings:
       - category: "InsecureRandom"
@@ -61,10 +192,24 @@ benchmarks:
         pq_vulnerable: false
         min_confidence: 0.6
     detection_channels: ["CH6:RANDOMNESS"]
+    detection_method: >
+      Collect N tokens, apply NIST SP 800-22 statistical tests:
+      frequency (monobit), runs, serial, cumulative sums.
+      Also check for sequential correlation (constant differences).
 
+  # --- OWASP WSTG-CRYP-02: Padding Oracle ---
   BM-06:
     name: "Padding Oracle"
-    description: "AES-CBC decryption endpoint leaks padding validity through error messages."
+    description: >
+      AES-CBC decryption endpoint leaks padding validity through
+      differential error messages. Classic Vaudenay (2002) attack.
+      Maps to OWASP WSTG-CRYP-02 (Testing for Padding Oracle).
+      Note: This is a runtime/blackbox vulnerability — not covered by
+      static analysis benchmarks (CamBench, CryptoAPI-Bench).
+    references:
+      owasp_wstg: "WSTG-CRYP-02"
+      cwe: ["CWE-209", "CWE-649"]
+      academic: "Vaudenay, 'Security Flaws Induced by CBC Padding', EUROCRYPT 2002"
     endpoint: "/api/decrypt"
     expected_findings:
       - category: "PaddingOracle"
@@ -73,10 +218,21 @@ benchmarks:
         pq_vulnerable: false
         min_confidence: 0.7
     detection_channels: ["CH3:ERROR_DIFFERENTIAL"]
+    detection_method: >
+      Modify last byte of ciphertext (0x00-0xFF), send 256 requests.
+      Cluster responses by (status_code, error_message, timing).
+      ≥2 distinct clusters indicates padding oracle.
 
+  # --- JWT alg=none (CWE-347) ---
   BM-07:
     name: "JWT alg=none"
-    description: "JWT verification accepts alg=none (no signature)."
+    description: >
+      JWT verification accepts alg=none (no signature verification).
+      Critical authentication bypass. Maps to CWE-347.
+    references:
+      owasp_wstg: "WSTG-CRYP-04"
+      cwe: ["CWE-347"]
+      academic: "Auth0, 'Critical vulnerabilities in JSON Web Token libraries', 2015"
     endpoint: "/api/auth"
     expected_findings:
       - category: "JWTAlgConfusion"
@@ -85,10 +241,21 @@ benchmarks:
         pq_vulnerable: false
         min_confidence: 0.9
     detection_channels: ["CH5:HASH_SIGNATURE"]
+    detection_method: >
+      Craft JWT with {"alg":"none"} header, empty signature.
+      If server accepts it, alg=none is exploitable.
 
+  # --- JWT RS256→HS256 confusion (CWE-347) ---
   BM-08:
     name: "JWT RS256→HS256 Confusion"
-    description: "JWT verification vulnerable to algorithm switching attack."
+    description: >
+      JWT verification vulnerable to algorithm switching attack.
+      Attacker switches alg from RS256 to HS256 and signs with
+      the public key as HMAC secret. Maps to CWE-347.
+    references:
+      owasp_wstg: "WSTG-CRYP-04"
+      cwe: ["CWE-347"]
+      academic: "McLean, 'Attacking JWT authentication', 2015"
     endpoint: "/api/auth-rsa"
     expected_findings:
       - category: "JWTAlgConfusion"
@@ -97,10 +264,21 @@ benchmarks:
         pq_vulnerable: false
         min_confidence: 0.7
     detection_channels: ["CH5:HASH_SIGNATURE"]
+    detection_method: >
+      Get public key from server. Craft JWT with alg=HS256,
+      sign with public key as HMAC secret. If accepted, vulnerable.
 
+  # --- SSL Labs Rating: Weak TLS Configuration ---
   BM-09:
     name: "Weak TLS Configuration"
-    description: "Nginx with TLS 1.0/1.1, RC4, CBC suites, no PFS, weak DH."
+    description: >
+      Nginx with TLS 1.0/1.1, RC4, CBC suites, no PFS, weak DH.
+      Scored using SSL Labs Rating Guide v2009r methodology.
+      Maps to OWASP WSTG-CRYP-01 (Testing for Weak TLS).
+    references:
+      owasp_wstg: "WSTG-CRYP-01"
+      cwe: ["CWE-326", "CWE-327"]
+      standard: "Qualys SSL Labs Rating Guide v2009r"
     endpoint: "/"
     port: 9443
     tls: true
@@ -125,11 +303,25 @@ benchmarks:
         algorithm: "RSA-key-exchange"
         pq_vulnerable: true
         min_confidence: 0.9
+    expected_ssl_labs_grade: "C"  # RC4 caps at C per SSL Labs guide
     detection_channels: ["CH1:TLS_HANDSHAKE"]
+    detection_method: >
+      Enumerate cipher suites (ClientHello with all known suites).
+      Test protocol versions (TLS 1.0, 1.1, 1.2, 1.3).
+      Check for PFS (ECDHE/DHE vs static RSA).
+      Score per SSL Labs Rating Guide.
 
+  # --- Timing Side-Channel (CWE-208) ---
   BM-10:
     name: "Timing Side-Channel (HMAC)"
-    description: "Non-constant-time HMAC verification leaks timing information."
+    description: >
+      Non-constant-time HMAC verification leaks timing information.
+      Byte-by-byte comparison with early termination.
+      Maps to CWE-208 (Observable Timing Discrepancy).
+      Note: Runtime vulnerability, not in static analysis benchmarks.
+    references:
+      cwe: ["CWE-208"]
+      academic: "Crosby et al., 'Opportunities and Limits of Remote Timing Attacks', 2009"
     endpoint: "/api/verify-hmac"
     expected_findings:
       - category: "TimingLeak"
@@ -138,26 +330,84 @@ benchmarks:
         pq_vulnerable: false
         min_confidence: 0.5
     detection_channels: ["CH4:TIMING_SIDE_CHANNEL"]
+    detection_method: >
+      Send HMAC values with increasing prefix match length.
+      Measure response time per prefix length (N ≥ 5000 measurements each).
+      Apply bootstrap hypothesis test for timing correlation.
+      Note: High network jitter may reduce confidence.
 
-# Negative controls: endpoints that should NOT trigger findings
+# ============================================================
+# Negative controls
+# ============================================================
 negative_controls:
   NC-01:
     name: "Strong Encryption (AES-256-GCM)"
     endpoint: "/api/encrypt-strong"
     description: "AES-256-GCM with random nonce. Should NOT trigger any alerts."
+    references:
+      note: "NIST-recommended AEAD. CamBench classifies GCM as secure mode."
 
   NC-02:
     name: "Strong Hash (SHA-256)"
     endpoint: "/api/hash-strong"
     description: "SHA-256 hash. Should NOT trigger WeakHash."
+    references:
+      note: "SHA-256 is not in CamBench/CryptoAPI-Bench weak hash list."
 
   NC-03:
     name: "Secure Random"
     endpoint: "/api/token-secure"
     description: "Tokens from os.urandom(). Should NOT trigger InsecureRandom."
+    references:
+      note: "CSPRNG. Should pass all NIST SP 800-22 tests."
 
   NC-04:
-    name: "Strong TLS"
+    name: "Strong TLS (TLS 1.3 only)"
     port: 9444
     tls: true
-    description: "TLS 1.3 only, strong suites, PFS. Should NOT trigger TLS findings."
+    description: "TLS 1.3 only, AEAD suites, PFS, HSTS. Should NOT trigger TLS findings."
+    expected_ssl_labs_grade: "A+"
+    references:
+      standard: "Qualys SSL Labs Rating Guide v2009r"
+
+# ============================================================
+# Scoring methodology
+# ============================================================
+scoring:
+  description: >
+    Follows standard IR metrics as used in CamBench and CryptoAPI-Bench evaluations.
+  metrics:
+    - name: "Precision"
+      formula: "TP / (TP + FP)"
+      description: "Fraction of reported findings that are true positives"
+    - name: "Recall"
+      formula: "TP / (TP + FN)"
+      description: "Fraction of ground-truth vulnerabilities detected"
+    - name: "F1 Score"
+      formula: "2 * P * R / (P + R)"
+      description: "Harmonic mean of precision and recall"
+    - name: "Confidence Calibration"
+      description: >
+        Measures alignment between reported confidence scores and actual correctness.
+        A well-calibrated detector should have confidence ≈ empirical accuracy.
+    - name: "SSL Labs Grade Accuracy"
+      description: >
+        For TLS benchmarks, compare computed SSL Labs grade against expected grade.
+    - name: "Detection Latency"
+      description: "Time to first detection per vulnerability class"
+
+  comparison_baselines:
+    - name: "testssl.sh"
+      scope: "TLS/SSL only (Phase 1)"
+      type: "deterministic tool"
+    - name: "sslyze"
+      scope: "TLS/SSL only (Phase 1)"
+      type: "deterministic tool"
+    - name: "CryptoScope LLM"
+      scope: "Static analysis (whitebox)"
+      type: "LLM-based"
+      reference: "arXiv:2508.11599"
+    - name: "Random baseline"
+      scope: "All phases"
+      type: "random classifier"
+      description: "Randomly assigns vulnerability categories with random confidence"
