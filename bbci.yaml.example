@@ -1,0 +1,36 @@
+# bb-crypto-inventory configuration
+agent:
+  # OpenAI-compatible model to use for the LLM agent
+  model: "gpt-4o"
+  # API base URL (optional, defaults to OpenAI)
+  # api_base: "https://api.openai.com/v1"
+  # Maximum Plan-Act-Observe iterations before stopping
+  max_iterations: 5
+  # Overall timeout in minutes
+  timeout_minutes: 30
+  # Temperature for LLM responses (lower = more deterministic)
+  temperature: 0.1
+
+scan:
+  # Which phases to run (0=Recon, 1=Protocol, 2=Application, 3=Oracle/Timing)
+  phases: [0, 1, 2, 3]
+  # Minimum confidence score to include in final report
+  min_confidence: 0.5
+  # Enable slow-pace mode for WAF/rate-limit evasion
+  slow_pace: false
+  # Delay between requests in slow-pace mode (seconds)
+  slow_pace_delay: 2.0
+  # Number of samples for randomness testing
+  randomness_samples: 10000
+  # Number of measurements for timing analysis
+  timing_measurements: 5000
+
+output:
+  # Output format: cyclonedx | json | markdown
+  format: "cyclonedx"
+  # Include raw evidence in output
+  include_evidence: true
+  # Include LLM-generated remediation suggestions
+  include_remediation: true
+  # Pretty-print JSON output
+  pretty: true
