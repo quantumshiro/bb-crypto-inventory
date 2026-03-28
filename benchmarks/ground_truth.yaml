@@ -1,0 +1,163 @@
+# Ground Truth: Expected findings for each benchmark target
+# Used by the scoring engine to compute precision/recall/F1
+
+benchmarks:
+  BM-01:
+    name: "ECB Mode Encryption"
+    description: "AES-128-ECB encryption endpoint. Identical plaintext blocks produce identical ciphertext blocks."
+    endpoint: "/api/encrypt"
+    expected_findings:
+      - category: "ECBMode"
+        severity: "high"
+        algorithm: "AES-128-ECB"
+        pq_vulnerable: false
+        min_confidence: 0.9
+    detection_channels: ["CH2:CIPHERTEXT_STATS"]
+
+  BM-02:
+    name: "Static IV/Nonce"
+    description: "AES-128-CBC with hardcoded IV. Same plaintext always produces same ciphertext."
+    endpoint: "/api/encrypt-cbc-static"
+    expected_findings:
+      - category: "StaticIV"
+        severity: "high"
+        algorithm: "AES-128-CBC"
+        pq_vulnerable: false
+        min_confidence: 0.8
+    detection_channels: ["CH2:CIPHERTEXT_STATS"]
+
+  BM-03:
+    name: "Weak Hash - MD5"
+    description: "API returns MD5 hashes of user data."
+    endpoint: "/api/hash"
+    expected_findings:
+      - category: "WeakHash"
+        severity: "high"
+        algorithm: "MD5"
+        pq_vulnerable: false
+        min_confidence: 0.8
+    detection_channels: ["CH5:HASH_SIGNATURE"]
+
+  BM-04:
+    name: "Weak Hash - SHA-1"
+    description: "API returns SHA-1 hashes for integrity verification."
+    endpoint: "/api/hash-sha1"
+    expected_findings:
+      - category: "WeakHash"
+        severity: "medium"
+        algorithm: "SHA-1"
+        pq_vulnerable: false
+        min_confidence: 0.8
+    detection_channels: ["CH5:HASH_SIGNATURE"]
+
+  BM-05:
+    name: "Insecure Random (LCG)"
+    description: "Session tokens generated with a linear congruential generator (predictable)."
+    endpoint: "/api/token"
+    expected_findings:
+      - category: "InsecureRandom"
+        severity: "high"
+        algorithm: "LCG"
+        pq_vulnerable: false
+        min_confidence: 0.6
+    detection_channels: ["CH6:RANDOMNESS"]
+
+  BM-06:
+    name: "Padding Oracle"
+    description: "AES-CBC decryption endpoint leaks padding validity through error messages."
+    endpoint: "/api/decrypt"
+    expected_findings:
+      - category: "PaddingOracle"
+        severity: "critical"
+        algorithm: "AES-128-CBC-PKCS7"
+        pq_vulnerable: false
+        min_confidence: 0.7
+    detection_channels: ["CH3:ERROR_DIFFERENTIAL"]
+
+  BM-07:
+    name: "JWT alg=none"
+    description: "JWT verification accepts alg=none (no signature)."
+    endpoint: "/api/auth"
+    expected_findings:
+      - category: "JWTAlgConfusion"
+        severity: "critical"
+        algorithm: "JWT-none"
+        pq_vulnerable: false
+        min_confidence: 0.9
+    detection_channels: ["CH5:HASH_SIGNATURE"]
+
+  BM-08:
+    name: "JWT RS256→HS256 Confusion"
+    description: "JWT verification vulnerable to algorithm switching attack."
+    endpoint: "/api/auth-rsa"
+    expected_findings:
+      - category: "JWTAlgConfusion"
+        severity: "critical"
+        algorithm: "JWT-RS256-to-HS256"
+        pq_vulnerable: false
+        min_confidence: 0.7
+    detection_channels: ["CH5:HASH_SIGNATURE"]
+
+  BM-09:
+    name: "Weak TLS Configuration"
+    description: "Nginx with TLS 1.0/1.1, RC4, CBC suites, no PFS, weak DH."
+    endpoint: "/"
+    port: 9443
+    tls: true
+    expected_findings:
+      - category: "WeakProtocolVersion"
+        severity: "medium"
+        algorithm: "TLSv1.0"
+        pq_vulnerable: false
+        min_confidence: 0.9
+      - category: "WeakProtocolVersion"
+        severity: "medium"
+        algorithm: "TLSv1.1"
+        pq_vulnerable: false
+        min_confidence: 0.9
+      - category: "InsecureCipherSuite"
+        severity: "high"
+        algorithm: "RC4"
+        pq_vulnerable: false
+        min_confidence: 0.8
+      - category: "NoPFS"
+        severity: "high"
+        algorithm: "RSA-key-exchange"
+        pq_vulnerable: true
+        min_confidence: 0.9
+    detection_channels: ["CH1:TLS_HANDSHAKE"]
+
+  BM-10:
+    name: "Timing Side-Channel (HMAC)"
+    description: "Non-constant-time HMAC verification leaks timing information."
+    endpoint: "/api/verify-hmac"
+    expected_findings:
+      - category: "TimingLeak"
+        severity: "medium"
+        algorithm: "HMAC-SHA256-non-constant-time"
+        pq_vulnerable: false
+        min_confidence: 0.5
+    detection_channels: ["CH4:TIMING_SIDE_CHANNEL"]
+
+# Negative controls: endpoints that should NOT trigger findings
+negative_controls:
+  NC-01:
+    name: "Strong Encryption (AES-256-GCM)"
+    endpoint: "/api/encrypt-strong"
+    description: "AES-256-GCM with random nonce. Should NOT trigger any alerts."
+
+  NC-02:
+    name: "Strong Hash (SHA-256)"
+    endpoint: "/api/hash-strong"
+    description: "SHA-256 hash. Should NOT trigger WeakHash."
+
+  NC-03:
+    name: "Secure Random"
+    endpoint: "/api/token-secure"
+    description: "Tokens from os.urandom(). Should NOT trigger InsecureRandom."
+
+  NC-04:
+    name: "Strong TLS"
+    port: 9444
+    tls: true
+    description: "TLS 1.3 only, strong suites, PFS. Should NOT trigger TLS findings."
