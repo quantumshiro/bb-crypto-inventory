@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 
 from bbci.tools.common import ToolResult, run_command, timed
 
@@ -42,10 +43,13 @@ class TLSTools:
         }
 
         # Use nmap's ssl-enum-ciphers script for comprehensive enumeration
-        stdout, stderr, rc = await run_command(
-            ["nmap", "--script", "ssl-enum-ciphers", "-p", str(port), host],
-            timeout=60,
-        )
+        if shutil.which("nmap"):
+            stdout, _, rc = await run_command(
+                ["nmap", "--script", "ssl-enum-ciphers", "-p", str(port), host],
+                timeout=60,
+            )
+        else:
+            stdout, rc = "", -1
 
         if rc == 0 and stdout:
             # Parse cipher suites from nmap output
@@ -85,6 +89,7 @@ class TLSTools:
 
         # Fallback: use openssl to test common suites
         if not results["accepted_suites"]:
+            # TLS 1.2 and below
             for cipher_group in ["ALL", "HIGH", "MEDIUM", "LOW", "EXPORT"]:
                 stdout, _, rc = await run_command(
                     [
@@ -92,19 +97,59 @@ class TLSTools:
                         "-connect", f"{host}:{port}",
                         "-servername", host,
                         "-cipher", cipher_group,
+                        "-tls1_2",
                     ],
                     timeout=10,
                 )
                 if rc == 0:
-                    cipher_match = re.search(r"Cipher\s*:\s*(\S+)", stdout)
-                    if cipher_match and cipher_match.group(1) != "0000":
+                    cipher_match = re.search(r"Cipher\s+(?:is|:)\s*(\S+)", stdout)
+                    if cipher_match and cipher_match.group(1) not in ("0000", "(NONE)"):
                         suite = cipher_match.group(1)
-                        entry = {"suite": suite, "source": "openssl_fallback"}
+                        if any(
+                            s["suite"] == suite and s.get("version") == "TLSv1.2"
+                            for s in results["accepted_suites"]
+                        ):
+                            continue
+                        entry = {"suite": suite, "source": "openssl_fallback", "version": "TLSv1.2"}
                         results["accepted_suites"].append(entry)
 
                         is_weak = any(w in suite for w in WEAK_CIPHERS)
                         if is_weak:
                             results["weak_suites"].append(entry)
+                        if "ECDHE" in suite or "DHE" in suite:
+                            results["has_pfs"] = True
+                        elif "RSA" in suite:
+                            results["has_non_pfs"] = True
+
+            # TLS 1.3 cipher suites
+            tls13_suites = [
+                "TLS_AES_256_GCM_SHA384",
+                "TLS_AES_128_GCM_SHA256",
+                "TLS_CHACHA20_POLY1305_SHA256",
+                "TLS_AES_128_CCM_SHA256",
+            ]
+            for tls13_suite in tls13_suites:
+                stdout, stderr, rc = await run_command(
+                    [
+                        "openssl", "s_client",
+                        "-connect", f"{host}:{port}",
+                        "-servername", host,
+                        "-ciphersuites", tls13_suite,
+                        "-tls1_3",
+                    ],
+                    timeout=10,
+                )
+                combined = stdout + stderr
+                cipher_match = re.search(r"Cipher\s+(?:is|:)\s*(\S+)", combined)
+                if cipher_match and cipher_match.group(1) not in ("0000", "(NONE)"):
+                    negotiated = cipher_match.group(1)
+                    if not any(
+                        s["suite"] == negotiated and s.get("version") == "TLSv1.3"
+                        for s in results["accepted_suites"]
+                    ):
+                        entry = {"suite": negotiated, "source": "openssl_fallback", "version": "TLSv1.3"}
+                        results["accepted_suites"].append(entry)
+                        results["has_pfs"] = True  # TLS 1.3 always uses PFS
 
         return ToolResult(
             tool_name="enumerate_cipher_suites",
@@ -146,7 +191,7 @@ class TLSTools:
             combined = stdout + stderr
             # Check if connection succeeded
             if "CONNECTED" in combined and "error" not in combined.lower():
-                cipher_match = re.search(r"Cipher\s*:\s*(\S+)", combined)
+                cipher_match = re.search(r"Cipher\s+(?:is|:)\s*(\S+)", combined)
                 cipher = cipher_match.group(1) if cipher_match else "unknown"
                 if cipher != "0000" and cipher != "(NONE)":
                     version_label = version_name.replace("_", ".").upper().replace("TLS", "TLSv")
@@ -233,7 +278,7 @@ class TLSTools:
             tested = {"group": group, "accepted": False}
 
             if "CONNECTED" in combined:
-                cipher_match = re.search(r"Cipher\s*:\s*(\S+)", combined)
+                cipher_match = re.search(r"Cipher\s+(?:is|:)\s*(\S+)", combined)
                 if cipher_match and cipher_match.group(1) not in ("0000", "(NONE)"):
                     tested["accepted"] = True
                     tested["cipher"] = cipher_match.group(1)

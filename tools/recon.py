@@ -11,6 +11,8 @@ Usage:
 
 import json
 import re
+import shutil
+import socket
 import subprocess
 import sys
 from urllib.parse import urlparse
@@ -19,7 +21,14 @@ import httpx
 
 
 def nmap_scan(host: str, ports: str = "22,80,443,8080,8443,993,995,587") -> dict:
-    """Run nmap port scan."""
+    """Run nmap port scan, with socket-based fallback if nmap is not installed."""
+    if shutil.which("nmap"):
+        return _nmap_scan_native(host, ports)
+    return _nmap_scan_socket_fallback(host, ports)
+
+
+def _nmap_scan_native(host: str, ports: str) -> dict:
+    """Port scan using nmap."""
     try:
         result = subprocess.run(
             ["nmap", "-sV", "--open", "-p", ports, host],
@@ -35,6 +44,40 @@ def nmap_scan(host: str, ports: str = "22,80,443,8080,8443,993,995,587") -> dict
         }
     except Exception as e:
         return {"tool": "nmap_scan", "error": str(e)}
+
+
+def _nmap_scan_socket_fallback(host: str, ports: str) -> dict:
+    """Port scan using Python sockets (fallback when nmap is unavailable)."""
+    port_service_map = {
+        22: "ssh", 80: "http", 443: "https", 587: "smtp",
+        636: "ldaps", 993: "imaps", 995: "pop3s",
+        989: "ftps-data", 990: "ftps", 8080: "http-alt", 8443: "https-alt",
+    }
+
+    port_list = [int(p.strip()) for p in ports.split(",")]
+    open_ports = []
+
+    for p in port_list:
+        try:
+            with socket.create_connection((host, p), timeout=3):
+                open_ports.append({
+                    "port": p,
+                    "service": port_service_map.get(p, "unknown"),
+                    "state": "open",
+                })
+        except (OSError, TimeoutError):
+            pass
+
+    return {
+        "tool": "nmap_scan",
+        "host": host,
+        "scan_method": "python_socket",
+        "open_ports": open_ports,
+        "crypto_ports": [
+            p for p in open_ports
+            if p["port"] in (22, 443, 8443, 993, 995, 587, 636, 989, 990)
+        ],
+    }
 
 
 def fetch_http_headers(url: str) -> dict:
@@ -77,7 +120,7 @@ def fetch_certificate_chain(host: str, port: int = 443) -> dict:
             (r"Signature Algorithm:\s*(\S+)", "signature_algorithm"),
             (r"Server public key is (\d+) bit", "key_length_bits"),
             (r"Protocol\s*:\s*(\S+)", "negotiated_protocol"),
-            (r"Cipher\s*:\s*(\S+)", "negotiated_cipher"),
+            (r"Cipher\s+(?:is|:)\s*(\S+)", "negotiated_cipher"),
         ]:
             m = re.search(pattern, combined)
             if m:

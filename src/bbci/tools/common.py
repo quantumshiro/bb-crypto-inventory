@@ -40,6 +40,7 @@ async def run_command(cmd: list[str], timeout: int = 30) -> tuple[str, str, int]
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

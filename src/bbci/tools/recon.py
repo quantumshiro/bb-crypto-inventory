@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+import socket
 from urllib.parse import urlparse
 
 import httpx
@@ -24,8 +26,16 @@ class ReconTools:
     async def nmap_scan(self, host: str, ports: str = "22,80,443,8080,8443,993,995,587") -> ToolResult:
         """Run nmap port scan to identify open ports and services.
 
+        Falls back to socket-based scanning when nmap is not installed.
+
         Tool: nmap_scan(host, ports)
         """
+        if shutil.which("nmap"):
+            return await self._nmap_scan_native(host, ports)
+        return await self._nmap_scan_socket_fallback(host, ports)
+
+    async def _nmap_scan_native(self, host: str, ports: str) -> ToolResult:
+        """Port scan using nmap."""
         stdout, stderr, rc = await run_command(
             ["nmap", "-sV", "--open", "-p", ports, host, "-oX", "-"],
             timeout=self.timeout,
@@ -38,7 +48,6 @@ class ReconTools:
                 error=f"nmap failed (rc={rc}): {stderr[:500]}",
             )
 
-        # Parse XML output for port info
         open_ports = []
         for match in re.finditer(
             r'<port protocol="(\w+)" portid="(\d+)">'
@@ -56,7 +65,6 @@ class ReconTools:
                 "version": version,
             })
 
-        # Simpler fallback parsing
         if not open_ports:
             for match in re.finditer(
                 r'<port protocol="(\w+)" portid="(\d+)">.*?<state state="open"',
@@ -75,6 +83,51 @@ class ReconTools:
             success=True,
             data={
                 "host": host,
+                "open_ports": open_ports,
+                "crypto_ports": [
+                    p for p in open_ports
+                    if p["port"] in (22, 443, 8443, 993, 995, 587, 636, 989, 990)
+                ],
+            },
+        )
+
+    async def _nmap_scan_socket_fallback(self, host: str, ports: str) -> ToolResult:
+        """Port scan using Python sockets (fallback when nmap is unavailable)."""
+        import asyncio
+
+        port_service_map = {
+            22: "ssh", 80: "http", 443: "https", 587: "smtp",
+            636: "ldaps", 993: "imaps", 995: "pop3s",
+            989: "ftps-data", 990: "ftps", 8080: "http-alt", 8443: "https-alt",
+        }
+
+        port_list = [int(p.strip()) for p in ports.split(",")]
+        open_ports: list[dict] = []
+
+        async def check_port(p: int) -> dict | None:
+            try:
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, p), timeout=3,
+                )
+                writer.close()
+                await writer.wait_closed()
+                return {
+                    "protocol": "tcp",
+                    "port": p,
+                    "service": port_service_map.get(p, "unknown"),
+                }
+            except (OSError, asyncio.TimeoutError):
+                return None
+
+        results = await asyncio.gather(*[check_port(p) for p in port_list])
+        open_ports = [r for r in results if r is not None]
+
+        return ToolResult(
+            tool_name="nmap_scan",
+            success=True,
+            data={
+                "host": host,
+                "scan_method": "python_socket",
                 "open_ports": open_ports,
                 "crypto_ports": [
                     p for p in open_ports
@@ -171,21 +224,6 @@ class ReconTools:
         )
 
         if cert_pem_match:
-            cert_pem = cert_pem_match.group(1)
-            x509_out, _, _ = await run_command(
-                ["openssl", "x509", "-noout", "-text"],
-                timeout=10,
-            )
-            # Parse from the full openssl output instead
-            detail_stdout, _, _ = await run_command(
-                [
-                    "openssl", "s_client",
-                    "-connect", f"{host}:{port}",
-                    "-servername", host,
-                ],
-                timeout=self.timeout,
-            )
-
             # Extract signature algorithm
             sig_match = re.search(r"Signature Algorithm:\s*(\S+)", stdout)
             if sig_match:
@@ -201,7 +239,7 @@ class ReconTools:
             if proto_match:
                 cert_info["negotiated_protocol"] = proto_match.group(1)
 
-            cipher_match = re.search(r"Cipher\s*:\s*(\S+)", stdout + stderr)
+            cipher_match = re.search(r"Cipher\s+(?:is|:)\s*(\S+)", stdout + stderr)
             if cipher_match:
                 cert_info["negotiated_cipher"] = cipher_match.group(1)
 
