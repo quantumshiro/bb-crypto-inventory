@@ -56,11 +56,23 @@
 - WSTG-CRYP-04: Testing for Weak Encryption
 
 ### 乱数テスト
-**NIST SP 800-22 Rev 1a** の統計テスト：
-- 周波数（モノビット）テスト
-- ランテスト
-- バイト頻度（カイ二乗）テスト
-- 連続相関テスト
+**少数サンプル Tier 方式**（[07-small-sample-randomness.md](07-small-sample-randomness.md) 参照）：
+
+NIST SP 800-22 Rev 1a を採用せず、ブラックボックス制約（WAF/BAN リスク、サンプル数制限）に適した手法を選定：
+
+| Tier | テスト | 根拠論文 |
+|------|--------|---------|
+| 1 | 差分解析（連番・LCG検出） | — |
+| 1 | Permutation Entropy | Bandt & Pompe, *Phys. Rev. Lett.*, 2002 |
+| 2 | SHR エントロピー推定 | Hausser & Strimmer, *JMLR*, 2009; Marcon et al., *Entropy*, 2021 |
+| 2 | Anderson-Darling 一様性検定 | Anderson & Darling, *JASA*, 1954 |
+| 2 | χ²バイト頻度検定 | — |
+| 2 | Collision Test | — |
+| 3 | SPRT 逐次検定 | Wald, *Ann. Math. Stat.*, 1945 |
+| 3 | Min-Entropy 推定 | NIST SP 800-90B, 2018 |
+| 3 | Maurer's Universal Test | Maurer, *J. Cryptology*, 1992 |
+
+**SP 800-22 を不採用とした理由**: 大量サンプル前提（数万件）、テスト間の独立性不足、Type II エラーの多さ（Hurley-Smith & Hernandez-Castro, ePrint 2022/169）。
 
 ## 5.3 ベンチマークターゲット一覧
 
@@ -72,7 +84,7 @@
 | BM-02 | 静的IV (AES-128-CBC) | CH2 | High | 同一平文の暗号文一致検出 |
 | BM-03 | 弱いハッシュ (MD5) | CH5 | High | 出力長32hex = 128bit |
 | BM-04 | 弱いハッシュ (SHA-1) | CH5 | High | 出力長40hex = 160bit |
-| BM-05 | 安全でない乱数 (LCG) | CH6 | Medium-High | NIST SP 800-22テスト不合格 |
+| BM-05 | 安全でない乱数 (LCG) | CH6 | High | Tier 1 差分解析で LCG 周期性検出 + Tier 2 SHR/χ²でエントロピー不足検出 |
 | BM-06 | Padding Oracle | CH3 | High | エラー応答パターンの差分 |
 | BM-07 | JWT alg=none | CH5 | ~1.0 | alg=none JWTの受入確認 |
 | BM-08 | JWT RS256→HS256 | CH5 | High | アルゴリズム切替テスト |
@@ -85,7 +97,7 @@
 |----|------|---------|
 | NC-01 | AES-256-GCM（ランダムnonce） | 検出なし |
 | NC-02 | SHA-256 | WeakHash検出なし |
-| NC-03 | os.urandom()トークン | InsecureRandom検出なし |
+| NC-03 | os.urandom()トークン | InsecureRandom検出なし（全 Tier Pass） |
 | NC-04 | TLS 1.3 only + AEAD + HSTS | TLS関連検出なし（Grade: A+） |
 
 ## 5.4 スコアリング手法

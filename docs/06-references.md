@@ -92,7 +92,7 @@
 ## 暗号標準・規格
 
 17. **NIST SP 800-22 Rev 1a**, "A Statistical Test Suite for Random and Pseudorandom Number Generators for Cryptographic Applications", 2010.
-    - 乱数品質評価の標準テストスイート。
+    - 乱数品質評価の標準テストスイート。**本プロジェクトでは不採用**（下記 25-32 の少数サンプル手法を代替採用）。
     - https://csrc.nist.gov/publications/detail/sp/800-22/rev-1a/final
 
 18. **NIST FIPS 203**, "Module-Lattice-Based Key-Encapsulation Mechanism Standard (ML-KEM)", 2024.
@@ -120,3 +120,45 @@
 
 24. **Auth0**, "Critical vulnerabilities in JSON Web Token libraries", 2015.
     - JWT alg=none, RS256→HS256 confusion等のJWT脆弱性。
+
+## 少数サンプル乱数品質評価（CH6 Tier 方式）
+
+25. **Hurley-Smith, D. & Hernandez-Castro, J.**, "SP 800-22 and GM/T 0005-2012 Tests: Clearly Obsolete, Possibly Harmful", IACR ePrint 2022/169, 2022.
+    - SP 800-22 の根本的問題を指摘。代替手法の必要性を論じる。
+    - https://eprint.iacr.org/2022/169
+
+26. **Bandt, C. & Pompe, B.**, "Permutation Entropy: A Natural Complexity Measure for Time Series", Physical Review Letters, 88(17), 2002.
+    - 順列エントロピー。少数サンプルの時系列パターン検出に使用（Tier 1）。
+    - https://doi.org/10.1103/PhysRevLett.88.174102
+
+27. **Hausser, J. & Strimmer, K.**, "Entropy Inference and the James-Stein Estimator, with Application to Nonlinear Gene Association Networks", JMLR 10, 2009.
+    - SHR（Shrinkage）エントロピー推定器。少数サンプルで最小バイアス（Tier 2）。
+    - https://jmlr.org/papers/v10/hausser09a.html
+
+28. **Marcon, E. et al.**, "Selecting an Effective Entropy Estimator for Short Sequences of Bits and Bytes with Maximum Entropy", Entropy 23(5), 561, 2021.
+    - 18種のエントロピー推定器を比較。SHR が短バイト列で最良と結論。
+    - https://doi.org/10.3390/e23050561
+
+29. **Wald, A.**, "Sequential Tests of Statistical Hypotheses", Annals of Mathematical Statistics, 16(2), 117-186, 1945.
+    - 逐次確率比検定（SPRT）。固定サンプルより少ない観測数で同等の検出力（Tier 3）。
+    - https://doi.org/10.1214/aoms/1177731118
+
+30. **NIST SP 800-90B**, "Recommendation for the Entropy Sources Used for Random Bit Generation", 2018.
+    - Min-Entropy 推定手法。MCV, Collision, 予測ベース推定器を採用（Tier 3）。
+    - https://csrc.nist.gov/pubs/sp/800/90/b/final
+
+31. **Maurer, U.M.**, "A Universal Statistical Test for Random Bit Generators", Journal of Cryptology, 5(2), 89-105, 1992.
+    - 圧縮可能性によるエントロピーレート測定。広範な統計的欠陥を単一テストで検出（Tier 3）。
+    - https://doi.org/10.1007/BF00193563
+
+32. **Anderson, T.W. & Darling, D.A.**, "A Test of Goodness of Fit", JASA, 49(268), 1954.
+    - 分布の一様性検定。KS検定よりテール偏りに対して高感度（Tier 2）。
+    - https://doi.org/10.1080/01621459.1954.10501232
+
+33. **L'Ecuyer, P. & Simard, R.**, "TestU01: A C Library for Empirical Testing of Random Number Generators", ACM TOMS, 33(4), 2007.
+    - SmallCrush バッテリー。SP 800-22 より少ないデータ量で同等以上の検出力。設計時の比較参考。
+    - https://doi.org/10.1145/1268776.1268777
+
+34. **Kim, H. et al.**, "On the Efficient Estimation of Min-Entropy", IEEE Trans. Information Forensics and Security, 16, 2021.
+    - Maurer テストベースの改良 min-entropy 推定器。計算量と推定精度の改善。
+    - https://doi.org/10.1109/TIFS.2021.3070424
