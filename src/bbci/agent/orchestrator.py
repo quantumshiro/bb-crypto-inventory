@@ -46,6 +46,8 @@ class AgentOrchestrator:
             timeout=30,
             slow_pace=config.scan.slow_pace,
             delay=config.scan.slow_pace_delay,
+            max_tokens=config.scan.max_tokens,
+            max_randomness_tier=config.scan.max_randomness_tier,
         )
         self.oracle = OracleTools(
             timeout=30,

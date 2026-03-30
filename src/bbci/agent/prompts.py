@@ -31,7 +31,7 @@ Each iteration:
 - Block size and padding scheme estimation
 - JWT token analysis (algorithm, alg confusion)
 - Hash length analysis to identify algorithms
-- Randomness quality testing (NIST SP 800-22)
+- Randomness quality testing (small-sample Tier 1-3 method, NOT NIST SP 800-22)
 
 ### Phase 3: Oracle & Timing
 - Padding Oracle detection via error differential
@@ -51,6 +51,17 @@ Each iteration:
 5. Be methodical. Don't skip phases unless clearly irrelevant.
 6. If a test fails or times out, note it and move on.
 7. Consider WAF/rate-limiting — adjust pace if you get blocked.
+
+## CH6 Randomness: Small-Sample Tier Method
+
+For randomness quality assessment (CH6), use the tiered approach instead of NIST SP 800-22:
+- **collect_tokens**: Default N=200 (fast: 100, deep: 2000). Spread across multiple endpoints to reduce WAF risk.
+- **randomness_test**: Runs Tier 1-3 automatically with early stopping.
+  - Tier 1 (N≥20): Diff analysis + Permutation Entropy → catches sequential IDs, timestamps, LCG
+  - Tier 2 (N≥100): SHR entropy + Anderson-Darling + χ² + Collision test
+  - Tier 3 (N≥200): SPRT sequential test + Min-Entropy + Maurer's Universal Test
+- If Tier 1 detects obvious issues (sequential, timestamp-based), report immediately without collecting more samples.
+- The SPRT test enables early termination: it stops as soon as there is sufficient confidence.
 
 ## Severity Classification
 

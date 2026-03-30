@@ -28,7 +28,8 @@ class ScanConfig:
     min_confidence: float = 0.5
     slow_pace: bool = False
     slow_pace_delay: float = 2.0
-    randomness_samples: int = 10000
+    max_tokens: int = 200
+    max_randomness_tier: int = 2
     timing_measurements: int = 5000
 
 

@@ -21,10 +21,19 @@ logger = logging.getLogger("bbci")
 class ApplicationTools:
     """Phase 2 application layer analysis tools."""
 
-    def __init__(self, timeout: int = 30, slow_pace: bool = False, delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        timeout: int = 30,
+        slow_pace: bool = False,
+        delay: float = 0.0,
+        max_tokens: int = 200,
+        max_randomness_tier: int = 2,
+    ) -> None:
         self.timeout = timeout
         self.slow_pace = slow_pace
         self.delay = delay
+        self.max_tokens = max_tokens
+        self.max_randomness_tier = max_randomness_tier
 
     @timed
     async def send_and_compare_ciphertext(
@@ -201,12 +210,15 @@ class ApplicationTools:
         )
 
     @timed
-    async def collect_tokens(self, url: str, n: int = 100) -> ToolResult:
+    async def collect_tokens(self, url: str, n: int | None = None) -> ToolResult:
         """Collect session tokens/IDs for randomness analysis.
 
         Tool: collect_tokens(url, n)
         """
         import asyncio
+
+        if n is None:
+            n = self.max_tokens
 
         tokens: list[dict] = []
         errors: list[str] = []
@@ -267,7 +279,7 @@ class ApplicationTools:
 
     @timed
     async def randomness_test(
-        self, samples: list[str], max_tier: int = 2, early_stop: bool = True
+        self, samples: list[str], max_tier: int | None = None, early_stop: bool = True
     ) -> ToolResult:
         """Run tiered statistical tests on collected token samples.
 
@@ -284,6 +296,9 @@ class ApplicationTools:
                 success=False,
                 error=f"Need at least 10 samples, got {len(samples)}",
             )
+
+        if max_tier is None:
+            max_tier = self.max_randomness_tier
 
         report = run_randomness_tests(
             samples=samples,
@@ -399,12 +414,12 @@ class ApplicationTools:
                 "type": "function",
                 "function": {
                     "name": "collect_tokens",
-                    "description": "Collect session tokens/IDs/CSRF tokens from repeated requests for randomness analysis.",
+                    "description": "Collect session tokens/IDs/CSRF tokens from repeated requests for randomness analysis. Uses small-sample approach to minimize WAF/BAN risk.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "url": {"type": "string", "description": "Target URL to collect tokens from"},
-                            "n": {"type": "integer", "description": "Number of tokens to collect (default: 100)"},
+                            "n": {"type": "integer", "description": "Number of tokens to collect (default: 200, fast: 100, deep: 2000)"},
                         },
                         "required": ["url"],
                     },

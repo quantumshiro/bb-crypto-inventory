@@ -20,8 +20,13 @@ scan:
   slow_pace: false
   # Delay between requests in slow-pace mode (seconds)
   slow_pace_delay: 2.0
-  # Number of samples for randomness testing
-  randomness_samples: 10000
+  # Max tokens to collect for CH6 randomness testing (default: 200, fast: 100, deep: 2000)
+  max_tokens: 200
+  # Max randomness tier to run (1=fast, 2=standard, 3=deep)
+  # Tier 1: Diff analysis + Permutation Entropy (N≥50)
+  # Tier 2: SHR entropy + Anderson-Darling + χ² + Collision (N≥100)
+  # Tier 3: SPRT + Min-Entropy + Maurer's Universal Test (N≥200)
+  max_randomness_tier: 2
   # Number of measurements for timing analysis
   timing_measurements: 5000
 

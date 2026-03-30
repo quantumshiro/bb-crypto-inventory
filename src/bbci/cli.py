@@ -50,6 +50,9 @@ def main() -> None:
 @click.option("--min-confidence", type=float, default=None, help="Minimum confidence threshold")
 @click.option("--model", type=str, default=None, help="LLM model to use")
 @click.option("--slow-pace", is_flag=True, help="Enable slow-pace mode for WAF evasion")
+@click.option("--fast", is_flag=True, help="Fast mode: Tier 1 randomness only (N≤100)")
+@click.option("--deep", is_flag=True, help="Deep mode: Tier 1+2+3 randomness (N≤2000)")
+@click.option("--max-tokens", type=int, default=None, help="Max tokens to collect for CH6 (default: 200)")
 @click.option("-c", "--config", "config_path", type=click.Path(), help="Config file path")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output")
 @click.option("--format", "output_format", type=click.Choice(["cyclonedx", "json", "markdown"]),
@@ -62,6 +65,9 @@ def scan(
     min_confidence: float | None,
     model: str | None,
     slow_pace: bool,
+    fast: bool,
+    deep: bool,
+    max_tokens: int | None,
     config_path: str | None,
     verbose: bool,
     output_format: str | None,
@@ -87,6 +93,14 @@ def scan(
         config.agent.model = model
     if slow_pace:
         config.scan.slow_pace = True
+    if fast:
+        config.scan.max_randomness_tier = 1
+        config.scan.max_tokens = min(config.scan.max_tokens, 100)
+    if deep:
+        config.scan.max_randomness_tier = 3
+        config.scan.max_tokens = max(config.scan.max_tokens, 2000)
+    if max_tokens is not None:
+        config.scan.max_tokens = max_tokens
     if output_format:
         config.output.format = output_format
 
