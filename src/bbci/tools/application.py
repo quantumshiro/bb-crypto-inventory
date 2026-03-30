@@ -13,6 +13,7 @@ from collections import Counter
 import httpx
 
 from bbci.tools.common import ToolResult, timed
+from bbci.tools.randomness import run_randomness_tests
 
 logger = logging.getLogger("bbci")
 
@@ -265,10 +266,17 @@ class ApplicationTools:
         )
 
     @timed
-    async def randomness_test(self, samples: list[str]) -> ToolResult:
-        """Run NIST SP 800-22 inspired statistical tests on collected samples.
+    async def randomness_test(
+        self, samples: list[str], max_tier: int = 2, early_stop: bool = True
+    ) -> ToolResult:
+        """Run tiered statistical tests on collected token samples.
 
-        Tool: randomness_test(samples)
+        Uses the small-sample approach from docs/07-small-sample-randomness.md:
+        - Tier 1 (N≥20):  Diff analysis, Permutation Entropy
+        - Tier 2 (N≥100): SHR Entropy, Anderson-Darling, χ², Collision
+        - Tier 3 (N≥200): SPRT, Min-Entropy, Maurer's Universal Test
+
+        Tool: randomness_test(samples, max_tier, early_stop)
         """
         if len(samples) < 10:
             return ToolResult(
@@ -277,107 +285,16 @@ class ApplicationTools:
                 error=f"Need at least 10 samples, got {len(samples)}",
             )
 
-        # Convert samples to byte sequences
-        byte_sequences: list[bytes] = []
-        for s in samples:
-            try:
-                byte_sequences.append(bytes.fromhex(s))
-            except ValueError:
-                try:
-                    byte_sequences.append(base64.b64decode(s + "=="))
-                except Exception:
-                    byte_sequences.append(s.encode())
-
-        all_bytes = b"".join(byte_sequences)
-        bits = "".join(f"{b:08b}" for b in all_bytes)
-
-        results: dict = {
-            "total_samples": len(samples),
-            "total_bits": len(bits),
-            "tests": {},
-        }
-
-        # Test 1: Frequency (monobit) test
-        ones = bits.count("1")
-        zeros = bits.count("0")
-        total = len(bits)
-        if total > 0:
-            freq_ratio = ones / total
-            # Expected: ~0.5 for random
-            freq_deviation = abs(freq_ratio - 0.5)
-            results["tests"]["frequency"] = {
-                "ones": ones,
-                "zeros": zeros,
-                "ratio": round(freq_ratio, 4),
-                "deviation": round(freq_deviation, 4),
-                "pass": freq_deviation < 0.05,
-            }
-
-        # Test 2: Runs test (alternating sequences)
-        if total > 1:
-            runs = 1
-            for i in range(1, len(bits)):
-                if bits[i] != bits[i - 1]:
-                    runs += 1
-
-            expected_runs = (2 * ones * zeros) / total + 1 if total > 0 else 0
-            runs_deviation = abs(runs - expected_runs) / total if total > 0 else 0
-            results["tests"]["runs"] = {
-                "observed_runs": runs,
-                "expected_runs": round(expected_runs, 2),
-                "deviation": round(runs_deviation, 6),
-                "pass": runs_deviation < 0.05,
-            }
-
-        # Test 3: Byte frequency (chi-square)
-        if len(all_bytes) >= 256:
-            byte_counts = Counter(all_bytes)
-            expected = len(all_bytes) / 256
-            chi_sq = sum((byte_counts.get(i, 0) - expected) ** 2 / expected for i in range(256))
-            # Chi-square critical value for 255 df at 0.01: ~310
-            results["tests"]["byte_chi_square"] = {
-                "chi_square": round(chi_sq, 2),
-                "expected_per_byte": round(expected, 2),
-                "pass": chi_sq < 350,  # Generous threshold
-            }
-
-        # Test 4: Sequential correlation
-        if len(samples) >= 3:
-            # Check if consecutive tokens show patterns
-            diffs: list[int] = []
-            for i in range(1, min(len(byte_sequences), 100)):
-                a = int.from_bytes(byte_sequences[i - 1][:8], "big") if len(byte_sequences[i - 1]) >= 8 else 0
-                b = int.from_bytes(byte_sequences[i][:8], "big") if len(byte_sequences[i]) >= 8 else 0
-                if a != 0:
-                    diffs.append(b - a)
-
-            if diffs:
-                # If diffs are constant, it's a counter (weak)
-                unique_diffs = len(set(diffs))
-                is_sequential = unique_diffs <= 3
-                results["tests"]["sequential_correlation"] = {
-                    "unique_differences": unique_diffs,
-                    "is_sequential": is_sequential,
-                    "sample_diffs": diffs[:10],
-                    "pass": not is_sequential,
-                }
-
-        # Overall assessment
-        test_results = [t.get("pass", True) for t in results["tests"].values()]
-        results["overall_pass"] = all(test_results)
-        results["passed_tests"] = sum(1 for t in test_results if t)
-        results["total_tests"] = len(test_results)
-
-        if not results["overall_pass"]:
-            failed = [name for name, t in results["tests"].items() if not t.get("pass", True)]
-            results["assessment"] = f"WEAK RANDOMNESS: Failed tests: {', '.join(failed)}"
-        else:
-            results["assessment"] = "Randomness appears adequate (passed all tests)"
+        report = run_randomness_tests(
+            samples=samples,
+            max_tier=max_tier,
+            early_stop=early_stop,
+        )
 
         return ToolResult(
             tool_name="randomness_test",
             success=True,
-            data=results,
+            data=report.to_dict(),
         )
 
     @timed
@@ -497,7 +414,13 @@ class ApplicationTools:
                 "type": "function",
                 "function": {
                     "name": "randomness_test",
-                    "description": "Run NIST SP 800-22 inspired statistical tests on collected token samples to assess randomness quality.",
+                    "description": (
+                        "Run tiered statistical tests on collected token samples. "
+                        "Tier 1 (N≥20): diff analysis + permutation entropy for immediate pattern detection. "
+                        "Tier 2 (N≥100): SHR entropy, Anderson-Darling, chi-square, collision test. "
+                        "Tier 3 (N≥200): SPRT sequential test, min-entropy estimation, Maurer's universal test. "
+                        "Uses early stopping: obvious failures detected with fewer samples."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -505,6 +428,15 @@ class ApplicationTools:
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "description": "List of token/random value samples (hex or base64)",
+                            },
+                            "max_tier": {
+                                "type": "integer",
+                                "description": "Maximum tier to run (1, 2, or 3). Default: 2",
+                                "enum": [1, 2, 3],
+                            },
+                            "early_stop": {
+                                "type": "boolean",
+                                "description": "Stop early if definitive failure is detected. Default: true",
                             },
                         },
                         "required": ["samples"],
