@@ -232,6 +232,8 @@ def compute_ssl_labs_grade(
 def score_findings(
     findings: list[dict[str, Any]],
     ground_truth_path: str = "benchmarks/ground_truth.yaml",
+    benchmark_ids: list[str] | None = None,
+    negative_control_ids: list[str] | None = None,
 ) -> BenchmarkScore:
     """Score bbci findings against ground truth.
 
@@ -245,6 +247,16 @@ def score_findings(
     gt = load_ground_truth(ground_truth_path)
     benchmarks = gt.get("benchmarks", {})
     negative_controls = gt.get("negative_controls", {})
+
+    if benchmark_ids is not None:
+        allowed = set(benchmark_ids)
+        benchmarks = {k: v for k, v in benchmarks.items() if k in allowed}
+
+    if negative_control_ids is not None:
+        allowed_nc = set(negative_control_ids)
+        negative_controls = {
+            k: v for k, v in negative_controls.items() if k in allowed_nc
+        }
 
     score = BenchmarkScore()
 

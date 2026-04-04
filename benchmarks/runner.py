@@ -4,8 +4,8 @@ Executes the bbci scanner against the benchmark test servers
 and scores results against ground truth.
 
 Usage:
-    python -m benchmarks.runner --target http://localhost:9000
-    python -m benchmarks.runner --target http://localhost:9000 --benchmark BM-01
+    python -m benchmarks.runner --target http://localhost:9000 --suite phase01
+    python -m benchmarks.runner --target http://localhost:9000 --suite phase01 --benchmark BM-09
     python -m benchmarks.runner --target http://localhost:9000 --report results/
 """
 
@@ -159,10 +159,25 @@ async def run_benchmarks(
     base_url: str,
     benchmark_filter: str | None = None,
     ground_truth_path: str = "benchmarks/ground_truth.yaml",
+    suite: str | None = None,
 ) -> dict:
     """Run benchmark suite and score results."""
     gt = load_ground_truth(ground_truth_path)
     benchmarks = gt.get("benchmarks", {})
+    suite_def: dict | None = None
+    negative_control_ids: list[str] | None = None
+
+    if suite:
+        suites = gt.get("benchmark_suites", {})
+        if suite not in suites:
+            raise ValueError(f"Unknown benchmark suite: {suite}")
+        suite_def = suites[suite]
+        benchmark_ids = set(suite_def.get("benchmark_ids", []))
+        benchmarks = {k: v for k, v in benchmarks.items() if k in benchmark_ids}
+        negative_control_ids = suite_def.get("negative_control_ids", [])
+        suite_phases = suite_def.get("phases")
+        if suite_phases:
+            config.scan.phases = list(suite_phases)
 
     if benchmark_filter:
         benchmarks = {
@@ -180,12 +195,20 @@ async def run_benchmarks(
         all_findings.extend(result["findings"])
 
     # Score against ground truth
-    score = score_findings(all_findings, ground_truth_path)
+    score = score_findings(
+        all_findings,
+        ground_truth_path,
+        benchmark_ids=list(benchmarks.keys()),
+        negative_control_ids=negative_control_ids,
+    )
 
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "target": base_url,
         "model": config.agent.model,
+        "suite": suite,
+        "suite_description": suite_def.get("description") if suite_def else None,
+        "phases": config.scan.phases,
         "benchmarks_run": len(benchmark_results),
         "benchmark_results": benchmark_results,
         "scoring": score.summary(),
@@ -202,6 +225,10 @@ def print_report(results: dict) -> None:
     print("=" * 70)
     print(f"  Target:     {results.get('target', 'N/A')}")
     print(f"  Model:      {results.get('model', 'N/A')}")
+    if results.get("suite"):
+        print(f"  Suite:      {results.get('suite')}")
+    if results.get("phases") is not None:
+        print(f"  Phases:     {results.get('phases')}")
     print(f"  Timestamp:  {results.get('timestamp', 'N/A')}")
     print(f"  Benchmarks: {results.get('benchmarks_run', 0)}")
     print("=" * 70)
@@ -245,6 +272,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="BBCI Benchmark Runner")
     parser.add_argument("--target", required=True, help="Base URL of benchmark server")
     parser.add_argument("--benchmark", default=None, help="Run specific benchmark (e.g., BM-01)")
+    parser.add_argument("--suite", default=None, help="Run a benchmark suite (e.g., phase01)")
     parser.add_argument("--ground-truth", default="benchmarks/ground_truth.yaml",
                         help="Path to ground truth YAML")
     parser.add_argument("--report", default=None, help="Directory to save report")
@@ -265,7 +293,7 @@ def main() -> None:
         results = asyncio.run(run_full_scan(config, args.target))
     else:
         results = asyncio.run(run_benchmarks(
-            config, args.target, args.benchmark, args.ground_truth
+            config, args.target, args.benchmark, args.ground_truth, args.suite
         ))
 
     # Print report

@@ -14,13 +14,18 @@ import hashlib
 import hmac
 import json
 import os
+import socket
+import ssl
 import struct
 import time
 
 import pytest
 import httpx
+from cryptography import x509
 
 BASE_URL = os.environ.get("BENCHMARK_URL", "http://localhost:9000")
+WEAK_TLS_URL = os.environ.get("BENCHMARK_WEAK_TLS_URL", "https://localhost:9443")
+STRONG_TLS_URL = os.environ.get("BENCHMARK_STRONG_TLS_URL", "https://localhost:9444")
 
 
 def server_available() -> bool:
@@ -36,6 +41,19 @@ skipif_no_server = pytest.mark.skipif(
     not server_available(),
     reason=f"Benchmark server not available at {BASE_URL}",
 )
+
+
+def _fetch_peer_certificate(host: str, port: int) -> x509.Certificate:
+    """Fetch the presented leaf certificate from a TLS endpoint."""
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+
+    with socket.create_connection((host, port), timeout=3) as sock:
+        with context.wrap_socket(sock, server_hostname=host) as tls_sock:
+            cert_der = tls_sock.getpeercert(binary_form=True)
+
+    return x509.load_der_x509_certificate(cert_der)
 
 
 @skipif_no_server
@@ -63,6 +81,31 @@ class TestBM01_ECBMode:
             httpx.post(f"{BASE_URL}/api/encrypt", content=payload).json()["ciphertext"]
         )
         assert ct1 == ct2, "ECB mode should be deterministic"
+
+
+@skipif_no_server
+class TestPhase01_TLSRecon:
+    """Phase 0+1 benchmark invariants for the weak/strong HTTPS edges."""
+
+    def test_weak_edge_missing_hsts(self) -> None:
+        resp = httpx.get(f"{WEAK_TLS_URL}/", verify=False)
+        assert "strict-transport-security" not in resp.headers
+
+    def test_strong_edge_has_hsts(self) -> None:
+        resp = httpx.get(f"{STRONG_TLS_URL}/", verify=False)
+        assert "strict-transport-security" in resp.headers
+
+    def test_weak_edge_certificate_is_rsa_1024_sha1(self) -> None:
+        cert = _fetch_peer_certificate("localhost", 9443)
+        assert cert.public_key().key_size == 1024
+        assert cert.signature_hash_algorithm is not None
+        assert cert.signature_hash_algorithm.name == "sha1"
+
+    def test_strong_edge_certificate_is_rsa_2048_sha256(self) -> None:
+        cert = _fetch_peer_certificate("localhost", 9444)
+        assert cert.public_key().key_size == 2048
+        assert cert.signature_hash_algorithm is not None
+        assert cert.signature_hash_algorithm.name == "sha256"
 
 
 @skipif_no_server

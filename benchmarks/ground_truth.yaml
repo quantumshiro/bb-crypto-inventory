@@ -5,7 +5,9 @@
 #   - TLS scoring follows SSL Labs Rating Guide v2009r (Qualys)
 #   - Test IDs map to OWASP WSTG v4.2 Chapter 9: Testing for Weak Cryptography
 #   - CWE references from MITRE CWE database
-#   - Randomness testing follows NIST SP 800-22 Rev 1a
+#   - Phase 0+1 MVP suite is URL-scoped: it evaluates the explicitly supplied edge URL,
+#     not cross-port neighborhood discovery across adjacent services.
+#   - Randomness testing for later suites follows the small-sample Tier 1-3 method
 #   - Output format follows CycloneDX CBOM v1.6
 #
 # Note: No established blackbox crypto inventory benchmark exists in the literature.
@@ -19,9 +21,174 @@
 #   [3] Ami et al., "Why Crypto-detectors Fail: A Systematic Evaluation of Cryptographic Misuse Detection Techniques" (MASC taxonomy), USENIX Security 2022
 #   [4] Qualys SSL Labs, "SSL Server Rating Guide", v2009r (2025)
 #   [5] OWASP, "Web Security Testing Guide v4.2", Chapter 9: Testing for Weak Cryptography
-#   [6] NIST SP 800-22 Rev 1a, "A Statistical Test Suite for Random and Pseudorandom Number Generators"
+#   [6] NIST SP 800-90B / small-sample entropy estimation references for later CH6 suites
 #   [7] Boehm et al., "Cryptoscope: Analyzing cryptographic usages in modern software", arXiv:2503.19531 (uses CamBench)
 #   [8] CryptoScope LLM, arXiv:2508.11599 (OWASP + CryptoAPI benchmark)
+
+# ============================================================
+# Benchmark suites
+# ============================================================
+benchmark_suites:
+  phase01:
+    name: "Phase 0+1 MVP"
+    description: >
+      URL-scoped benchmark for Recon (Phase 0) and Protocol Layer (Phase 1).
+      The input is an explicit HTTPS edge URL. Scoring covers observations that
+      should be obtainable directly from that URL: HTTP security headers,
+      certificate properties, TLS protocol support, cipher suite posture, and
+      PFS. It does NOT score broad adjacent-port discovery.
+    phases: [0, 1]
+    evaluation_mode: "url_scoped"
+    assumptions:
+      - "User supplies the explicit HTTPS edge URL to assess."
+      - "Scoring is confined to data directly observable from that URL."
+      - "Adjacent port discovery is not required for credit."
+      - "The suite models authorized self-assessment of a service edge."
+    non_goals:
+      - "network neighborhood discovery"
+      - "SSH discovery"
+      - "OpenAPI discovery"
+      - "app-layer crypto misuse detection"
+      - "oracle / timing / randomness testing"
+    request_budget:
+      header_fetch_max: 2
+      certificate_fetch_max: 2
+      version_probe_max: 4
+      cipher_probe_max: 8
+      total_actions_recommended_max: 16
+    required_capabilities:
+      - "fetch_http_headers"
+      - "fetch_certificate_chain"
+      - "test_protocol_versions"
+      - "enumerate_cipher_suites"
+    optional_capabilities:
+      - "test_downgrade_attack"
+      - "test_pqc_support"
+    release_gate:
+      precision_min: 0.95
+      recall_min: 0.90
+      ssl_grade_accuracy_required: true
+      negative_control_false_positives_allowed: 0
+      repeated_runs_min: 10
+    score_weights:
+      tls_posture: 0.45
+      no_hsts: 0.10
+      weak_key_length: 0.15
+      weak_signature_algorithm: 0.15
+      negative_control_suppression: 0.15
+    benchmark_ids:
+      - BM-09
+      - BM-11
+      - BM-12
+      - BM-13
+    negative_control_ids:
+      - NC-04
+    recommended_base_url: "http://localhost:9000"
+
+phase01_contract:
+  spec_version: "1.0"
+  spec_paths:
+    suite_spec: "benchmarks/phase01-spec.md"
+    scoring_spec: "benchmarks/phase01-scoring-spec.md"
+    report_schema: "benchmarks/phase01-report.schema.json"
+  suite_categories:
+    - "WeakProtocolVersion"
+    - "InsecureCipherSuite"
+    - "NoPFS"
+    - "NoHSTS"
+    - "WeakKeyLength"
+    - "WeakSignatureAlgorithm"
+  input_contract:
+    allowed_schemes: ["https"]
+    canonicalization:
+      lowercase_scheme_host: true
+      default_https_port: 443
+      normalize_empty_path_to_slash: true
+      strip_query_for_target_identity: true
+      strip_fragment: true
+    redirect_policy:
+      same_origin_max_hops: 1
+      cross_origin_result: "inconclusive"
+      scheme_change_result: "inconclusive"
+    tls_policy:
+      require_sni: true
+      certificate_trust_required: false
+      allow_self_signed_for_observation: true
+  request_accounting:
+    action_types:
+      - "http_request"
+      - "certificate_handshake"
+      - "version_probe"
+      - "cipher_probe"
+      - "retry"
+      - "redirect_follow"
+    retry_policy:
+      max_retries_per_action: 1
+      count_retries_as_actions: true
+  normalization:
+    protocol_aliases:
+      TLSv1: "TLSv1.0"
+      TLS1.0: "TLSv1.0"
+      TLS1.1: "TLSv1.1"
+      TLS1.2: "TLSv1.2"
+      TLS1.3: "TLSv1.3"
+    cipher_family_aliases:
+      RC4-SHA: "RC4-family"
+      RC4-MD5: "RC4-family"
+      DES-CBC3-SHA: "3DES-family"
+      AES128-SHA: "static-RSA"
+      AES256-SHA: "static-RSA"
+      AES128-SHA256: "static-RSA"
+      AES256-SHA256: "static-RSA"
+      ECDHE-RSA-AES128-SHA: "ECDHE-RSA"
+      ECDHE-RSA-AES256-SHA: "ECDHE-RSA"
+      TLS_AES_128_GCM_SHA256: "TLSv1.3-AEAD"
+      TLS_AES_256_GCM_SHA384: "TLSv1.3-AEAD"
+      TLS_CHACHA20_POLY1305_SHA256: "TLSv1.3-AEAD"
+    signature_algorithm_aliases:
+      sha1WithRSA: "sha1WithRSAEncryption"
+      sha1_rsa: "sha1WithRSAEncryption"
+      sha256WithRSA: "sha256WithRSAEncryption"
+      sha256_rsa: "sha256WithRSAEncryption"
+    pfs_semantics:
+      positive_when_any_non_pfs_suite_accepted: true
+      acceptable_pfs_key_exchange_families: ["ECDHE", "DHE"]
+      non_pfs_key_exchange_families: ["RSA", "static-RSA", "PSK", "SRP"]
+  evidence_contract:
+    common_required_keys:
+      - "observation_ids"
+      - "target_url"
+      - "collected_via"
+      - "captured_at"
+    by_category:
+      WeakProtocolVersion:
+        - "supported_protocols"
+        - "accepted_protocol"
+      InsecureCipherSuite:
+        - "accepted_suites"
+        - "normalized_suite_families"
+        - "representative_suite"
+      NoPFS:
+        - "accepted_suites"
+        - "accepted_key_exchange_families"
+        - "non_pfs_accepted"
+      NoHSTS:
+        - "response_headers"
+        - "redirect_hops_followed"
+      WeakKeyLength:
+        - "certificate_position"
+        - "key_type"
+        - "key_length_bits"
+      WeakSignatureAlgorithm:
+        - "certificate_position"
+        - "signature_algorithm"
+  verdict_statuses:
+    - "matched"
+    - "missed"
+    - "false_positive"
+    - "duplicate_false_positive"
+    - "true_negative"
+    - "inconclusive"
 
 # ============================================================
 # Misuse category mapping to standards
@@ -49,8 +216,9 @@ ssl_labs_scoring:
   description: >
     TLS scoring follows Qualys SSL Labs Rating Guide v2009r.
     Protocol support (30%), Key exchange (30%), Cipher strength (40%).
-    Grade caps: SSL 3.0 → max B; TLS 1.0/1.1 without mitigation → max B;
-    No PFS → capped at B; RC4 → capped at C; 64-bit block cipher → capped at C.
+    For phase01, "NoPFS" means that at least one non-PFS handshake is accepted.
+    Grade caps: TLS 1.0/1.1 → max B; non-PFS accepted → max B;
+    RC4 → max C; 64-bit block cipher → max C. A+ requires HSTS.
   protocol_scores:
     SSLv2: 0
     SSLv3: 80
@@ -69,6 +237,9 @@ ssl_labs_scoring:
     D: 35
     E: 20
     F: 0
+  a_plus_requirements:
+    hsts_required: true
+    min_hsts_max_age_seconds: 15552000
 
 # ============================================================
 # Benchmark targets
@@ -176,14 +347,14 @@ benchmarks:
       Session tokens generated with a linear congruential generator
       (java.util.Random-equivalent). Maps to CamBench Rule 14 /
       CryptoAPI-Bench Rule 14 / MASC M74.
-      Evaluated using NIST SP 800-22 Rev 1a statistical tests.
+      Evaluated using the small-sample Tier 1-3 randomness method.
     references:
       cambench_rule: 14
       cryptoapi_bench_rule: 14
       masc_operator: "M74"
       owasp_wstg: "WSTG-CRYP-04"
       cwe: ["CWE-330"]
-      nist: "SP 800-22 Rev 1a"
+      nist: "SP 800-90B / small-sample Tier method"
     endpoint: "/api/token"
     expected_findings:
       - category: "InsecureRandom"
@@ -193,9 +364,9 @@ benchmarks:
         min_confidence: 0.6
     detection_channels: ["CH6:RANDOMNESS"]
     detection_method: >
-      Collect N tokens, apply NIST SP 800-22 statistical tests:
-      frequency (monobit), runs, serial, cumulative sums.
-      Also check for sequential correlation (constant differences).
+      Collect N tokens, then apply Tier 1 diff analysis for obvious patterns
+      plus Tier 2 entropy / uniformity tests. LCG should fail by periodicity
+      and entropy bias without requiring large-sample SP 800-22 style tests.
 
   # --- OWASP WSTG-CRYP-02: Padding Oracle ---
   BM-06:
@@ -272,8 +443,9 @@ benchmarks:
   BM-09:
     name: "Weak TLS Configuration"
     description: >
-      Nginx with TLS 1.0/1.1, RC4, CBC suites, no PFS, weak DH.
-      Scored using SSL Labs Rating Guide v2009r methodology.
+      Nginx TLS edge with TLS 1.0/1.1 enabled, weak cipher suites, no enforced
+      PFS posture, and a weak certificate. This is the primary positive target
+      for the Phase 0+1 MVP suite. Scored using SSL Labs Rating Guide v2009r.
       Maps to OWASP WSTG-CRYP-01 (Testing for Weak TLS).
     references:
       owasp_wstg: "WSTG-CRYP-01"
@@ -282,6 +454,33 @@ benchmarks:
     endpoint: "/"
     port: 9443
     tls: true
+    target_url: "https://localhost:9443/"
+    request_budget:
+      recommended_max_actions: 12
+    required_tools:
+      - "test_protocol_versions"
+      - "enumerate_cipher_suites"
+    optional_tools:
+      - "test_downgrade_attack"
+      - "test_pqc_support"
+    expected_observations:
+      tls_versions_supported:
+        - "TLSv1.0"
+        - "TLSv1.1"
+        - "TLSv1.2"
+      tls_versions_not_supported:
+        - "TLSv1.3"
+      weak_cipher_indicators:
+        - "RC4-family accepted"
+      accepts_non_pfs_suites: true
+      supports_some_pfs_suites: true
+      representative_non_pfs_suite: "AES128-SHA"
+      ssl_labs_grade: "C"
+    evidence_requirements:
+      - "supported_versions"
+      - "accepted_suites"
+      - "accepted_key_exchange_families or equivalent posture signal"
+      - "ssl grade or grade inputs"
     expected_findings:
       - category: "WeakProtocolVersion"
         severity: "medium"
@@ -295,12 +494,12 @@ benchmarks:
         min_confidence: 0.9
       - category: "InsecureCipherSuite"
         severity: "high"
-        algorithm: "RC4"
+        algorithm: "RC4-family"
         pq_vulnerable: false
         min_confidence: 0.8
       - category: "NoPFS"
         severity: "high"
-        algorithm: "RSA-key-exchange"
+        algorithm: "static-RSA"
         pq_vulnerable: true
         min_confidence: 0.9
     expected_ssl_labs_grade: "C"  # RC4 caps at C per SSL Labs guide
@@ -310,6 +509,119 @@ benchmarks:
       Test protocol versions (TLS 1.0, 1.1, 1.2, 1.3).
       Check for PFS (ECDHE/DHE vs static RSA).
       Score per SSL Labs Rating Guide.
+    matching_rules:
+      - "WeakProtocolVersion requires category match plus evidence that the named version is accepted."
+      - "InsecureCipherSuite requires evidence of at least one accepted RC4-family or otherwise benchmark-declared weak suite."
+      - "NoPFS requires evidence that at least one accepted non-PFS handshake exists, even if some PFS suites are also supported."
+      - "SSL grade is scored separately against expected_ssl_labs_grade."
+
+  # --- Recon: Missing HSTS on the weak HTTPS edge ---
+  BM-11:
+    name: "Missing HSTS Header"
+    description: >
+      HTTPS edge omits Strict-Transport-Security. This is scored as a Recon
+      finding because the supplied URL is already known to be HTTPS-capable.
+      Maps to OWASP WSTG-CRYP-01 / CWE-319 style transport hardening checks.
+    references:
+      owasp_wstg: "WSTG-CRYP-01"
+      cwe: ["CWE-319"]
+    endpoint: "/"
+    port: 9443
+    tls: true
+    target_url: "https://localhost:9443/"
+    request_budget:
+      recommended_max_actions: 2
+    required_tools:
+      - "fetch_http_headers"
+    expected_observations:
+      hsts_present: false
+    evidence_requirements:
+      - "response_headers"
+    expected_findings:
+      - category: "NoHSTS"
+        severity: "low"
+        algorithm: "HSTS-missing"
+        pq_vulnerable: false
+        min_confidence: 0.8
+    detection_channels: ["RECON"]
+    detection_method: >
+      Fetch HTTPS response headers from the supplied URL and verify that
+      Strict-Transport-Security is absent.
+    matching_rules:
+      - "Finding must be based on direct response headers from the supplied URL."
+
+  # --- Recon: Weak certificate key length ---
+  BM-12:
+    name: "Weak Certificate Key Length"
+    description: >
+      Weak HTTPS edge presents a self-signed RSA-1024 certificate. This is a
+      Recon finding because the weakness is visible from certificate-chain
+      extraction alone, without application-specific requests.
+    references:
+      owasp_wstg: "WSTG-CRYP-01"
+      cwe: ["CWE-326"]
+    endpoint: "/"
+    port: 9443
+    tls: true
+    target_url: "https://localhost:9443/"
+    request_budget:
+      recommended_max_actions: 2
+    required_tools:
+      - "fetch_certificate_chain"
+    expected_observations:
+      certificate_key_type: "RSA"
+      certificate_key_length_bits: 1024
+    evidence_requirements:
+      - "key_type"
+      - "key_length_bits"
+    expected_findings:
+      - category: "WeakKeyLength"
+        severity: "high"
+        algorithm: "RSA-1024"
+        pq_vulnerable: true
+        min_confidence: 0.8
+    detection_channels: ["RECON"]
+    detection_method: >
+      Extract the presented certificate and inspect the public key size.
+      RSA keys below 2048 bits are scored as inadequate.
+    matching_rules:
+      - "Finding must include evidence of RSA key type and a measured length below 2048 bits."
+
+  # --- Recon: Weak certificate signature algorithm ---
+  BM-13:
+    name: "Weak Certificate Signature Algorithm"
+    description: >
+      Weak HTTPS edge presents a certificate signed with SHA-1 with RSA. This
+      is benchmarked separately from key length because it should be detectable
+      from certificate metadata even when the key size check is implemented
+      independently.
+    references:
+      owasp_wstg: "WSTG-CRYP-01"
+      cwe: ["CWE-327"]
+    endpoint: "/"
+    port: 9443
+    tls: true
+    target_url: "https://localhost:9443/"
+    request_budget:
+      recommended_max_actions: 2
+    required_tools:
+      - "fetch_certificate_chain"
+    expected_observations:
+      certificate_signature_algorithm: "sha1WithRSAEncryption"
+    evidence_requirements:
+      - "signature_algorithm"
+    expected_findings:
+      - category: "WeakSignatureAlgorithm"
+        severity: "high"
+        algorithm: "sha1WithRSAEncryption"
+        pq_vulnerable: true
+        min_confidence: 0.8
+    detection_channels: ["RECON"]
+    detection_method: >
+      Extract the presented certificate and inspect its signature algorithm.
+      SHA-1-based certificate signatures are scored as weak.
+    matching_rules:
+      - "Finding must include the certificate signature algorithm or a clearly equivalent normalized form."
 
   # --- Timing Side-Channel (CWE-208) ---
   BM-10:
@@ -359,14 +671,31 @@ negative_controls:
     endpoint: "/api/token-secure"
     description: "Tokens from os.urandom(). Should NOT trigger InsecureRandom."
     references:
-      note: "CSPRNG. Should pass all NIST SP 800-22 tests."
+      note: "CSPRNG. Should pass the small-sample Tier 1-3 randomness checks."
 
   NC-04:
     name: "Strong TLS (TLS 1.3 only)"
     port: 9444
     tls: true
-    description: "TLS 1.3 only, AEAD suites, PFS, HSTS. Should NOT trigger TLS findings."
+    target_url: "https://localhost:9444/"
+    description: >
+      TLS 1.3 only, AEAD suites, PFS, HSTS enabled, RSA-2048 certificate signed
+      with SHA-256. Should NOT trigger Phase 0+1 findings.
     expected_ssl_labs_grade: "A+"
+    expected_observations:
+      tls_versions_supported:
+        - "TLSv1.3"
+      tls_versions_not_supported:
+        - "TLSv1.0"
+        - "TLSv1.1"
+        - "TLSv1.2"
+      hsts_present: true
+      hsts_max_age_seconds: 63072000
+      certificate_key_type: "RSA"
+      certificate_key_length_bits: 2048
+      certificate_signature_algorithm: "sha256WithRSAEncryption"
+      accepts_non_pfs_suites: false
+      supports_some_pfs_suites: true
     references:
       standard: "Qualys SSL Labs Rating Guide v2009r"
 
