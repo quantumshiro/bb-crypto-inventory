@@ -15,17 +15,19 @@ import argparse
 import asyncio
 import json
 import logging
-import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-
-import yaml
+from typing import Any
 
 from bbci.agent.orchestrator import AgentOrchestrator
 from bbci.config import Config
-
-from benchmarks.scoring import BenchmarkScore, load_ground_truth, score_findings
+from bbci.phase01 import Phase01Scanner, canonicalize_https_url
+from benchmarks.scoring import (
+    load_ground_truth,
+    score_findings,
+    score_phase01_reports,
+)
 
 logger = logging.getLogger("bbci.benchmark")
 
@@ -51,6 +53,7 @@ async def run_individual_benchmark(
 
     if port:
         from urllib.parse import urlparse
+
         parsed = urlparse(base_url)
         scheme = "https" if use_tls else parsed.scheme
         target = f"{scheme}://{parsed.hostname}:{port}{endpoint}"
@@ -63,7 +66,7 @@ async def run_individual_benchmark(
     start = time.monotonic()
 
     try:
-        report = await orchestrator.scan(target)
+        await orchestrator.scan(target)
         duration = time.monotonic() - start
 
         findings = [
@@ -163,6 +166,9 @@ async def run_benchmarks(
 ) -> dict:
     """Run benchmark suite and score results."""
     gt = load_ground_truth(ground_truth_path)
+    if suite == "phase01":
+        return await run_phase01_suite(config, ground_truth_path, benchmark_filter)
+
     benchmarks = gt.get("benchmarks", {})
     suite_def: dict | None = None
     negative_control_ids: list[str] | None = None
@@ -181,7 +187,8 @@ async def run_benchmarks(
 
     if benchmark_filter:
         benchmarks = {
-            k: v for k, v in benchmarks.items()
+            k: v
+            for k, v in benchmarks.items()
             if k == benchmark_filter or benchmark_filter.lower() in v.get("name", "").lower()
         }
 
@@ -203,7 +210,7 @@ async def run_benchmarks(
     )
 
     return {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "target": base_url,
         "model": config.agent.model,
         "suite": suite,
@@ -213,6 +220,96 @@ async def run_benchmarks(
         "benchmark_results": benchmark_results,
         "scoring": score.summary(),
         "total_findings": len(all_findings),
+    }
+
+
+async def run_phase01_suite(
+    config: Config,
+    ground_truth_path: str,
+    benchmark_filter: str | None = None,
+) -> dict:
+    """Run the deterministic phase01 suite against unique HTTPS edge URLs."""
+    gt = load_ground_truth(ground_truth_path)
+    suite_def = gt["benchmark_suites"]["phase01"]
+    scanner = Phase01Scanner(timeout=10)
+
+    benchmark_ids = list(suite_def.get("benchmark_ids", []))
+    negative_control_ids = list(suite_def.get("negative_control_ids", []))
+    all_ids = benchmark_ids + negative_control_ids
+
+    if benchmark_filter:
+        all_ids = [bm_id for bm_id in all_ids if bm_id == benchmark_filter]
+        if not all_ids:
+            raise ValueError(f"Unknown phase01 benchmark filter: {benchmark_filter}")
+
+    unique_targets: dict[str, dict[str, Any]] = {}
+    for benchmark_id in all_ids:
+        if benchmark_id in gt.get("benchmarks", {}):
+            benchmark_def = gt["benchmarks"][benchmark_id]
+        else:
+            benchmark_def = gt["negative_controls"][benchmark_id]
+        target_url = canonicalize_https_url(benchmark_def["target_url"])
+        target_entry = unique_targets.setdefault(
+            target_url,
+            {
+                "target_url": target_url,
+                "benchmark_ids": [],
+            },
+        )
+        target_entry["benchmark_ids"].append(benchmark_id)
+
+    phase01_reports: list[dict[str, Any]] = []
+    benchmark_results: list[dict[str, Any]] = []
+    for target_url, target_info in unique_targets.items():
+        logger.info(
+            "Running phase01 target %s for benchmarks %s",
+            target_url,
+            ",".join(target_info["benchmark_ids"]),
+        )
+        report = await scanner.scan_target(target_url)
+        phase01_reports.append(report)
+        benchmark_results.append(
+            {
+                "target": target_url,
+                "benchmark_ids": target_info["benchmark_ids"],
+                "finding_count": len(report.get("findings", [])),
+                "request_accounting": report.get("request_accounting", {}),
+                "benchmark_verdicts": report.get("benchmark_verdicts", []),
+                "observed_grade": next(
+                    (
+                        observation.get("data", {}).get("grade")
+                        for observation in report.get("observations", [])
+                        if observation.get("type") == "tls_grade"
+                    ),
+                    None,
+                ),
+                "success": True,
+            }
+        )
+
+    selected_benchmark_ids = [bm_id for bm_id in all_ids if bm_id in gt.get("benchmarks", {})]
+    selected_negative_control_ids = [
+        bm_id for bm_id in all_ids if bm_id in gt.get("negative_controls", {})
+    ]
+    score = score_phase01_reports(
+        phase01_reports,
+        ground_truth_path,
+        benchmark_ids=selected_benchmark_ids,
+        negative_control_ids=selected_negative_control_ids,
+    )
+
+    return {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "target": suite_def.get("recommended_base_url"),
+        "model": config.agent.model,
+        "suite": "phase01",
+        "suite_description": suite_def.get("description"),
+        "phases": suite_def.get("phases", []),
+        "benchmarks_run": len(benchmark_results),
+        "benchmark_results": benchmark_results,
+        "phase01_reports": phase01_reports,
+        "scoring": score.summary(),
+        "total_findings": sum(len(report.get("findings", [])) for report in phase01_reports),
     }
 
 
@@ -237,8 +334,16 @@ def print_report(results: dict) -> None:
     print(f"  Precision:        {scoring.get('precision', 0):.1%}")
     print(f"  Recall:           {scoring.get('recall', 0):.1%}")
     print(f"  F1 Score:         {scoring.get('f1_score', 0):.1%}")
+    if "ssl_grade_accuracy" in scoring:
+        print(f"  SSL Grade Acc.:   {scoring.get('ssl_grade_accuracy', 0):.1%}")
+    if "budget_compliance_rate" in scoring:
+        print(f"  Budget Comp.:     {scoring.get('budget_compliance_rate', 0):.1%}")
+    if "inconclusive_rate" in scoring:
+        print(f"  Inconclusive:     {scoring.get('inconclusive_rate', 0):.1%}")
     print(f"  True Positives:   {scoring.get('true_positives', 0)}")
     print(f"  False Positives:  {scoring.get('false_positives', 0)}")
+    if "duplicate_false_positives" in scoring:
+        print(f"  Duplicate FP:     {scoring.get('duplicate_false_positives', 0)}")
     print(f"  False Negatives:  {scoring.get('false_negatives', 0)}")
     print(f"  True Negatives:   {scoring.get('true_negatives', 0)}")
 
@@ -273,8 +378,9 @@ def main() -> None:
     parser.add_argument("--target", required=True, help="Base URL of benchmark server")
     parser.add_argument("--benchmark", default=None, help="Run specific benchmark (e.g., BM-01)")
     parser.add_argument("--suite", default=None, help="Run a benchmark suite (e.g., phase01)")
-    parser.add_argument("--ground-truth", default="benchmarks/ground_truth.yaml",
-                        help="Path to ground truth YAML")
+    parser.add_argument(
+        "--ground-truth", default="benchmarks/ground_truth.yaml", help="Path to ground truth YAML"
+    )
     parser.add_argument("--report", default=None, help="Directory to save report")
     parser.add_argument("--model", default=None, help="LLM model override")
     parser.add_argument("--config", default=None, help="bbci config file")
@@ -292,9 +398,9 @@ def main() -> None:
     if args.full_scan:
         results = asyncio.run(run_full_scan(config, args.target))
     else:
-        results = asyncio.run(run_benchmarks(
-            config, args.target, args.benchmark, args.ground_truth, args.suite
-        ))
+        results = asyncio.run(
+            run_benchmarks(config, args.target, args.benchmark, args.ground_truth, args.suite)
+        )
 
     # Print report
     print_report(results)
