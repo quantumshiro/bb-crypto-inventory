@@ -1,0 +1,392 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bbci.local/schemas/phase01-report.schema.json",
+  "title": "BBCI Phase01 Benchmark Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "suite_id",
+    "scanner",
+    "execution",
+    "request_accounting",
+    "observations",
+    "findings",
+    "benchmark_verdicts"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase01-report/v1"
+    },
+    "suite_id": {
+      "const": "phase01"
+    },
+    "scanner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_url",
+        "canonical_target",
+        "evaluation_mode",
+        "started_at",
+        "finished_at"
+      ],
+      "properties": {
+        "target_url": {
+          "$ref": "#/$defs/url"
+        },
+        "canonical_target": {
+          "$ref": "#/$defs/url"
+        },
+        "evaluation_mode": {
+          "const": "url_scoped"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finished_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "request_accounting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total_actions",
+        "header_fetches",
+        "certificate_fetches",
+        "version_probes",
+        "cipher_probes",
+        "budget_compliant"
+      ],
+      "properties": {
+        "total_actions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "header_fetches": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "certificate_fetches": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "version_probes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cipher_probes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "redirect_hops_followed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "budget_compliant": {
+          "type": "boolean"
+        }
+      }
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/observation"
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "benchmark_verdicts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/verdict"
+      }
+    },
+    "suite_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "precision": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "recall": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "f1_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "ssl_grade_accuracy": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "budget_compliance_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "inconclusive_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "target_url",
+        "captured_at",
+        "data"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "http_headers",
+            "certificate_leaf",
+            "tls_protocol_support",
+            "tls_cipher_acceptance",
+            "tls_grade"
+          ]
+        },
+        "target_url": {
+          "$ref": "#/$defs/url"
+        },
+        "captured_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "data": {
+          "type": "object"
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "target_url",
+        "category",
+        "severity",
+        "algorithm",
+        "confidence",
+        "detection_channel",
+        "evidence"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_url": {
+          "$ref": "#/$defs/url"
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "WeakProtocolVersion",
+            "InsecureCipherSuite",
+            "NoPFS",
+            "NoHSTS",
+            "WeakKeyLength",
+            "WeakSignatureAlgorithm"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "algorithm": {
+          "type": "string",
+          "enum": [
+            "TLSv1.0",
+            "TLSv1.1",
+            "RC4-family",
+            "static-RSA",
+            "HSTS-missing",
+            "RSA-1024",
+            "sha1WithRSAEncryption"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "detection_channel": {
+          "type": "string",
+          "enum": [
+            "RECON",
+            "CH1:TLS_HANDSHAKE"
+          ]
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "observation_ids",
+        "target_url",
+        "collected_via",
+        "captured_at"
+      ],
+      "properties": {
+        "observation_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "target_url": {
+          "$ref": "#/$defs/url"
+        },
+        "collected_via": {
+          "type": "string",
+          "minLength": 1
+        },
+        "captured_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "benchmark_id",
+        "target_url",
+        "status",
+        "matched_finding_ids",
+        "evidence_valid",
+        "budget_compliant"
+      ],
+      "properties": {
+        "benchmark_id": {
+          "type": "string",
+          "pattern": "^(BM|NC)-[0-9]{2}$"
+        },
+        "target_url": {
+          "$ref": "#/$defs/url"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "matched",
+            "missed",
+            "false_positive",
+            "duplicate_false_positive",
+            "true_negative",
+            "inconclusive"
+          ]
+        },
+        "matched_finding_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expected_grade": {
+          "type": "string",
+          "enum": [
+            "A+",
+            "A",
+            "B",
+            "C",
+            "D",
+            "E",
+            "F"
+          ]
+        },
+        "observed_grade": {
+          "type": "string",
+          "enum": [
+            "A+",
+            "A",
+            "B",
+            "C",
+            "D",
+            "E",
+            "F"
+          ]
+        },
+        "evidence_valid": {
+          "type": "boolean"
+        },
+        "budget_compliant": {
+          "type": "boolean"
+        },
+        "latency_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

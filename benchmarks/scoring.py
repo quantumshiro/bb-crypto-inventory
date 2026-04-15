@@ -21,6 +21,13 @@ from typing import Any
 
 import yaml
 
+from bbci.phase01 import (
+    canonicalize_https_url,
+    compute_tls_grade,
+    normalize_protocol,
+    normalize_signature_algorithm,
+)
+
 
 @dataclass
 class MatchResult:
@@ -46,15 +53,21 @@ class BenchmarkScore:
     false_positives: int = 0
     false_negatives: int = 0
     true_negatives: int = 0  # Negative controls that correctly produced no findings
+    duplicate_false_positives: int = 0
 
     matches: list[MatchResult] = field(default_factory=list)
     false_positive_findings: list[dict] = field(default_factory=list)
     negative_control_results: list[dict] = field(default_factory=list)
+    benchmark_verdicts: list[dict[str, Any]] = field(default_factory=list)
+    phase01_reports: list[dict[str, Any]] = field(default_factory=list)
 
     per_benchmark: dict[str, dict[str, Any]] = field(default_factory=dict)
     per_channel: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     confidence_calibration: list[dict] = field(default_factory=list)
+    ssl_grade_accuracy: float = 0.0
+    budget_compliance_rate: float = 0.0
+    inconclusive_rate: float = 0.0
 
     @property
     def precision(self) -> float:
@@ -86,13 +99,19 @@ class BenchmarkScore:
             "f1_score": round(self.f1, 4),
             "true_positives": self.true_positives,
             "false_positives": self.false_positives,
+            "duplicate_false_positives": self.duplicate_false_positives,
             "false_negatives": self.false_negatives,
             "true_negatives": self.true_negatives,
             "total_expected": self.total_expected,
             "total_detected": self.total_detected,
+            "ssl_grade_accuracy": round(self.ssl_grade_accuracy, 4),
+            "budget_compliance_rate": round(self.budget_compliance_rate, 4),
+            "inconclusive_rate": round(self.inconclusive_rate, 4),
             "per_benchmark": self.per_benchmark,
             "per_channel": self.per_channel,
             "confidence_calibration": self.confidence_calibration,
+            "negative_control_results": self.negative_control_results,
+            "benchmark_verdicts": self.benchmark_verdicts,
         }
 
 
@@ -102,33 +121,6 @@ def load_ground_truth(path: str = "benchmarks/ground_truth.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-# ============================================================
-# SSL Labs Rating Guide v2009r scoring
-# ============================================================
-
-# Protocol scores per SSL Labs guide
-SSL_LABS_PROTOCOL_SCORES: dict[str, int] = {
-    "SSLv2": 0,
-    "SSLv3": 80,
-    "TLSv1.0": 90,
-    "TLSv1.1": 95,
-    "TLSv1.2": 100,
-    "TLSv1.3": 100,
-}
-
-# Cipher strength scores (bits -> score)
-def _cipher_strength_score(bits: int) -> int:
-    """Score cipher strength per SSL Labs guide."""
-    if bits == 0:
-        return 0
-    elif bits < 128:
-        return 20
-    elif bits < 256:
-        return 80
-    else:
-        return 100
-
-
 def compute_ssl_labs_grade(
     supported_protocols: list[str],
     cipher_suites: list[dict],
@@ -136,102 +128,326 @@ def compute_ssl_labs_grade(
     has_rc4: bool = False,
     has_3des: bool = False,
     key_exchange_bits: int = 2048,
+    hsts_header: str | None = None,
 ) -> dict[str, Any]:
-    """Compute SSL Labs-style grade from TLS scan results.
+    """Backward-compatible wrapper around the phase01 grade calculator."""
+    suites = [dict(suite) for suite in cipher_suites]
+    for suite in suites:
+        if "normalized_family" not in suite:
+            family = suite.get("suite", "")
+            if has_rc4 and "RC4" in family:
+                suite["normalized_family"] = "RC4-family"
+            elif has_3des and "3DES" in family:
+                suite["normalized_family"] = "3DES-family"
+            else:
+                suite["normalized_family"] = family
+        if "key_exchange_family" not in suite:
+            suite["key_exchange_family"] = "ECDHE" if has_pfs else "static-RSA"
 
-    Follows Qualys SSL Labs Rating Guide v2009r:
-    - Protocol support: 30%
-    - Key exchange: 30%
-    - Cipher strength: 40%
-    - Grade caps for specific weaknesses
+    return compute_tls_grade(
+        supported_protocols=supported_protocols,
+        accepted_suites=suites,
+        key_exchange_bits=key_exchange_bits,
+        hsts_header=hsts_header,
+    )
 
-    Returns dict with score, grade, and breakdown.
-    """
-    # Protocol score (average of best and worst)
-    proto_scores = [
-        SSL_LABS_PROTOCOL_SCORES.get(p, 50)
-        for p in supported_protocols
-    ]
-    if proto_scores:
-        protocol_score = (max(proto_scores) + min(proto_scores)) / 2
-    else:
-        protocol_score = 0
 
-    # Key exchange score
-    if key_exchange_bits >= 4096:
-        kx_score = 100
-    elif key_exchange_bits >= 2048:
-        kx_score = 90
-    elif key_exchange_bits >= 1024:
-        kx_score = 80
-    elif key_exchange_bits >= 512:
-        kx_score = 40
-    else:
-        kx_score = 20
+def _phase01_in_scope_categories(contract: dict[str, Any]) -> set[str]:
+    return set(contract.get("suite_categories", []))
 
-    # Cipher strength score (average of strongest and weakest)
-    cipher_bits = [s.get("bits", 128) for s in cipher_suites] if cipher_suites else [128]
-    if cipher_bits:
-        strongest = _cipher_strength_score(max(cipher_bits))
-        weakest = _cipher_strength_score(min(cipher_bits))
-        cipher_score = (strongest + weakest) / 2
-    else:
-        cipher_score = 0
 
-    # Combined score (30/30/40 weighting)
-    overall = (protocol_score * 0.30 + kx_score * 0.30 + cipher_score * 0.40)
+def _normalize_phase01_algorithm(category: str, algorithm: str) -> str:
+    if category == "WeakProtocolVersion":
+        return normalize_protocol(algorithm)
+    if category == "WeakSignatureAlgorithm":
+        return normalize_signature_algorithm(algorithm)
+    if category == "InsecureCipherSuite" and algorithm in {"RC4", "RC4-SHA", "RC4-MD5"}:
+        return "RC4-family"
+    if category == "NoPFS" and algorithm in {"RSA-key-exchange", "RSA", "static RSA"}:
+        return "static-RSA"
+    return algorithm
 
-    # Determine base grade
-    if overall >= 80:
-        grade = "A"
-    elif overall >= 65:
-        grade = "B"
-    elif overall >= 50:
-        grade = "C"
-    elif overall >= 35:
-        grade = "D"
-    elif overall >= 20:
-        grade = "E"
-    else:
-        grade = "F"
 
-    # Grade caps per SSL Labs rules
-    caps_applied = []
+def _finding_target(finding: dict[str, Any]) -> str:
+    target = finding.get("target_url") or finding.get("endpoint") or ""
+    return canonicalize_https_url(target) if target else ""
 
-    if "SSLv2" in supported_protocols:
-        grade = "F"
-        caps_applied.append("SSLv2 → F")
-    if "SSLv3" in supported_protocols and grade < "C":
-        grade = max(grade, "C")
-        caps_applied.append("SSLv3 → max B")
-    if has_rc4 and grade < "C":
-        grade = "C"
-        caps_applied.append("RC4 → max C")
-    if has_3des and grade < "C":
-        grade = "C"
-        caps_applied.append("3DES (64-bit block) → max C")
-    if not has_pfs and grade < "B":
-        grade = "B"
-        caps_applied.append("No PFS → max B")
-    if any(p in supported_protocols for p in ["TLSv1.0", "TLSv1.1"]):
-        if grade == "A":
-            grade = "B"
-            caps_applied.append("TLS 1.0/1.1 → max B")
 
-    return {
-        "overall_score": round(overall, 1),
-        "grade": grade,
-        "protocol_score": round(protocol_score, 1),
-        "key_exchange_score": round(kx_score, 1),
-        "cipher_strength_score": round(cipher_score, 1),
-        "caps_applied": caps_applied,
-        "methodology": "Qualys SSL Labs Rating Guide v2009r",
+def _required_evidence_keys(contract: dict[str, Any], category: str) -> list[str]:
+    by_category = contract.get("evidence_contract", {}).get("by_category", {})
+    common = contract.get("evidence_contract", {}).get("common_required_keys", [])
+    return list(common) + list(by_category.get(category, []))
+
+
+def _evidence_valid(
+    finding: dict[str, Any], contract: dict[str, Any], category: str, algorithm: str
+) -> bool:
+    evidence = finding.get("evidence", {})
+    if not isinstance(evidence, dict):
+        return False
+    for key in _required_evidence_keys(contract, category):
+        if key not in evidence:
+            return False
+
+    if category == "WeakProtocolVersion":
+        return normalize_protocol(evidence.get("accepted_protocol", "")) == algorithm
+    if category == "InsecureCipherSuite":
+        families = set(evidence.get("normalized_suite_families", []))
+        return "RC4-family" in families
+    if category == "NoPFS":
+        return evidence.get("non_pfs_accepted") is True
+    if category == "NoHSTS":
+        headers = {k.lower(): v for k, v in evidence.get("response_headers", {}).items()}
+        return "strict-transport-security" not in headers
+    if category == "WeakKeyLength":
+        return (
+            evidence.get("certificate_position") == "leaf"
+            and evidence.get("key_type") == "RSA"
+            and evidence.get("key_length_bits") == 1024
+        )
+    if category == "WeakSignatureAlgorithm":
+        return (
+            evidence.get("certificate_position") == "leaf"
+            and normalize_signature_algorithm(evidence.get("signature_algorithm", "")) == algorithm
+        )
+    return True
+
+
+def _phase01_grade_from_report(report: dict[str, Any]) -> str | None:
+    for observation in report.get("observations", []):
+        if observation.get("type") == "tls_grade":
+            data = observation.get("data", {})
+            return data.get("grade")
+    return None
+
+
+def score_phase01_reports(
+    reports: list[dict[str, Any]],
+    ground_truth_path: str = "benchmarks/ground_truth.yaml",
+    benchmark_ids: list[str] | None = None,
+    negative_control_ids: list[str] | None = None,
+) -> BenchmarkScore:
+    """Score phase01 target reports against the phase01 contract."""
+    gt = load_ground_truth(ground_truth_path)
+    contract = gt.get("phase01_contract", {})
+    suite = gt.get("benchmark_suites", {}).get("phase01", {})
+    benchmarks = gt.get("benchmarks", {})
+    negative_controls = gt.get("negative_controls", {})
+    in_scope_categories = _phase01_in_scope_categories(contract)
+
+    score = BenchmarkScore()
+    score.phase01_reports = reports
+
+    expected_units: list[tuple[str, str, str, str, float]] = []
+    selected_benchmark_ids = benchmark_ids or list(suite.get("benchmark_ids", []))
+    selected_negative_control_ids = negative_control_ids or list(
+        suite.get("negative_control_ids", [])
+    )
+
+    for benchmark_id in selected_benchmark_ids:
+        benchmark = benchmarks[benchmark_id]
+        target_url = canonicalize_https_url(benchmark["target_url"])
+        score.per_benchmark[benchmark_id] = {
+            "name": benchmark["name"],
+            "expected": len(benchmark.get("expected_findings", [])),
+            "detected": 0,
+            "findings": [],
+        }
+        for expected in benchmark.get("expected_findings", []):
+            expected_units.append(
+                (
+                    benchmark_id,
+                    target_url,
+                    expected["category"],
+                    _normalize_phase01_algorithm(
+                        expected["category"], expected.get("algorithm", "")
+                    ),
+                    expected.get("min_confidence", 0.5),
+                )
+            )
+    score.total_expected = len(expected_units)
+
+    canonical_reports = {
+        canonicalize_https_url(report["execution"]["canonical_target"]): report
+        for report in reports
     }
+    all_findings: list[dict[str, Any]] = []
+    for report in reports:
+        all_findings.extend(report.get("findings", []))
+
+    in_scope_findings = [
+        finding for finding in all_findings if finding.get("category") in in_scope_categories
+    ]
+    score.total_detected = len(in_scope_findings)
+
+    matched_ids: set[str] = set()
+    duplicate_ids: set[str] = set()
+
+    for benchmark_id, target_url, category, algorithm, min_confidence in expected_units:
+        candidates = []
+        for finding in in_scope_findings:
+            if finding.get("id") in matched_ids:
+                continue
+            if _finding_target(finding) != target_url:
+                continue
+            if finding.get("category") != category:
+                continue
+            if _normalize_phase01_algorithm(category, finding.get("algorithm", "")) != algorithm:
+                continue
+            if finding.get("detection_channel") not in {"RECON", "CH1:TLS_HANDSHAKE"}:
+                continue
+            if not _evidence_valid(finding, contract, category, algorithm):
+                continue
+            candidates.append(finding)
+
+        candidates.sort(
+            key=lambda finding: (
+                -float(finding.get("confidence", 0.0)),
+                str(finding.get("id", "")),
+            )
+        )
+
+        if candidates:
+            chosen = candidates[0]
+            matched_ids.add(chosen["id"])
+            for duplicate in candidates[1:]:
+                duplicate_ids.add(duplicate["id"])
+            score.true_positives += 1
+            score.per_benchmark[benchmark_id]["detected"] += 1
+            score.confidence_calibration.append(
+                {
+                    "benchmark": benchmark_id,
+                    "expected_min": min_confidence,
+                    "actual": chosen.get("confidence", 0.0),
+                    "meets_threshold": chosen.get("confidence", 0.0) >= min_confidence,
+                }
+            )
+            score.matches.append(
+                MatchResult(
+                    benchmark_id=benchmark_id,
+                    expected_category=category,
+                    expected_algorithm=algorithm,
+                    matched=True,
+                    matched_finding_id=chosen.get("id"),
+                    matched_confidence=chosen.get("confidence", 0.0),
+                    expected_min_confidence=min_confidence,
+                )
+            )
+        else:
+            score.false_negatives += 1
+            score.matches.append(
+                MatchResult(
+                    benchmark_id=benchmark_id,
+                    expected_category=category,
+                    expected_algorithm=algorithm,
+                    matched=False,
+                    expected_min_confidence=min_confidence,
+                    notes="Not detected",
+                )
+            )
+
+    for benchmark_id in selected_benchmark_ids:
+        for channel in benchmarks[benchmark_id].get("detection_channels", []):
+            if channel not in score.per_channel:
+                score.per_channel[channel] = {"expected": 0, "detected": 0}
+            score.per_channel[channel]["expected"] += score.per_benchmark[benchmark_id]["expected"]
+            score.per_channel[channel]["detected"] += score.per_benchmark[benchmark_id]["detected"]
+
+    for finding in in_scope_findings:
+        finding_id = finding.get("id", "")
+        if finding_id in matched_ids:
+            continue
+        score.false_positives += 1
+        if finding_id in duplicate_ids:
+            score.duplicate_false_positives += 1
+        score.false_positive_findings.append(finding)
+
+    grade_targets: list[tuple[str, str, str]] = []
+    if "BM-09" in selected_benchmark_ids:
+        grade_targets.append(
+            (
+                "BM-09",
+                canonicalize_https_url(benchmarks["BM-09"]["target_url"]),
+                benchmarks["BM-09"]["expected_ssl_labs_grade"],
+            )
+        )
+    for nc_id in selected_negative_control_ids:
+        nc_def = negative_controls[nc_id]
+        grade_targets.append(
+            (nc_id, canonicalize_https_url(nc_def["target_url"]), nc_def["expected_ssl_labs_grade"])
+        )
+
+    grade_matches = 0
+    assessed_grade_targets = 0
+    for benchmark_id, target_url, expected_grade in grade_targets:
+        report = canonical_reports.get(target_url)
+        if report is None:
+            continue
+        observed_grade = _phase01_grade_from_report(report)
+        if observed_grade is None:
+            continue
+        assessed_grade_targets += 1
+        if observed_grade == expected_grade:
+            grade_matches += 1
+        score.benchmark_verdicts.append(
+            {
+                "benchmark_id": benchmark_id,
+                "target_url": target_url,
+                "expected_grade": expected_grade,
+                "observed_grade": observed_grade,
+                "status": "matched" if observed_grade == expected_grade else "missed",
+            }
+        )
+    score.ssl_grade_accuracy = (
+        grade_matches / assessed_grade_targets if assessed_grade_targets else 0.0
+    )
+
+    budget_reports = 0
+    budget_compliant = 0
+    inconclusive = 0
+    for report in reports:
+        request_accounting = report.get("request_accounting", {})
+        if request_accounting:
+            budget_reports += 1
+            if request_accounting.get("budget_compliant"):
+                budget_compliant += 1
+        if any(
+            verdict.get("status") == "inconclusive"
+            for verdict in report.get("benchmark_verdicts", [])
+        ):
+            inconclusive += 1
+        score.benchmark_verdicts.extend(report.get("benchmark_verdicts", []))
+
+    score.budget_compliance_rate = budget_compliant / budget_reports if budget_reports else 0.0
+    score.inconclusive_rate = inconclusive / len(reports) if reports else 0.0
+
+    for nc_id in selected_negative_control_ids:
+        nc_def = negative_controls[nc_id]
+        target_url = canonicalize_https_url(nc_def["target_url"])
+        has_finding = any(_finding_target(finding) == target_url for finding in in_scope_findings)
+        expected_grade = nc_def.get("expected_ssl_labs_grade")
+        observed_grade = _phase01_grade_from_report(canonical_reports.get(target_url, {}))
+        passed = not has_finding and observed_grade == expected_grade
+        score.negative_control_results.append(
+            {
+                "id": nc_id,
+                "name": nc_def["name"],
+                "passed": passed,
+                "observed_grade": observed_grade,
+                "expected_grade": expected_grade,
+            }
+        )
+        if passed:
+            score.true_negatives += 1
+
+    return score
 
 
 def score_findings(
     findings: list[dict[str, Any]],
     ground_truth_path: str = "benchmarks/ground_truth.yaml",
+    benchmark_ids: list[str] | None = None,
+    negative_control_ids: list[str] | None = None,
 ) -> BenchmarkScore:
     """Score bbci findings against ground truth.
 
@@ -245,6 +461,14 @@ def score_findings(
     gt = load_ground_truth(ground_truth_path)
     benchmarks = gt.get("benchmarks", {})
     negative_controls = gt.get("negative_controls", {})
+
+    if benchmark_ids is not None:
+        allowed = set(benchmark_ids)
+        benchmarks = {k: v for k, v in benchmarks.items() if k in allowed}
+
+    if negative_control_ids is not None:
+        allowed_nc = set(negative_control_ids)
+        negative_controls = {k: v for k, v in negative_controls.items() if k in allowed_nc}
 
     score = BenchmarkScore()
 
@@ -307,12 +531,14 @@ def score_findings(
                 score.matches.append(match)
 
                 # Confidence calibration
-                score.confidence_calibration.append({
-                    "benchmark": bm_id,
-                    "expected_min": exp_min_conf,
-                    "actual": best_confidence,
-                    "meets_threshold": best_confidence >= exp_min_conf,
-                })
+                score.confidence_calibration.append(
+                    {
+                        "benchmark": bm_id,
+                        "expected_min": exp_min_conf,
+                        "actual": best_confidence,
+                        "meets_threshold": best_confidence >= exp_min_conf,
+                    }
+                )
             else:
                 score.false_negatives += 1
                 match = MatchResult(
