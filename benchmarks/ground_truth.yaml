@@ -147,6 +147,66 @@ benchmark_suites:
       - D-NC-02
       - D-NC-03
     recommended_base_url: "http://localhost:9000"
+  phase03:
+    name: "Phase 3 Classification MVP"
+    description: >
+      Base-URL-scoped deterministic classification benchmark for externally
+      observable application-layer cryptographic misuses. The suite starts from
+      an authorized application base URL, reuses same-origin discovery, and
+      then actively probes only the discovered encryption, hash, token, and JWT
+      surfaces needed to classify misuse. Padding-oracle and timing-specific
+      validation remain out of scope for this suite.
+    phases: [0, 2]
+    evaluation_mode: "base_url_classification"
+    assumptions:
+      - "User supplies the explicit base URL of their own service."
+      - "Same-origin descriptor discovery from phase02 is available."
+      - "The scanner may send deterministic probe payloads to discovered surfaces."
+      - "The suite models authorized self-assessment of exposed crypto behavior."
+    non_goals:
+      - "TLS posture assessment"
+      - "padding oracle validation"
+      - "timing side-channel analysis"
+      - "adjacent-port neighborhood discovery"
+    request_budget:
+      descriptor_fetch_max: 4
+      classification_probe_max: 52
+      token_sample_max: 16
+      total_actions_recommended_max: 56
+    required_capabilities:
+      - "discover_crypto_relevant_surfaces"
+      - "probe_encryption_oracles"
+      - "probe_hash_oracles"
+      - "collect_and_analyze_tokens"
+      - "probe_jwt_auth_surfaces"
+      - "normalize_findings_with_evidence"
+    optional_capabilities:
+      - "reuse_phase02_discovery_cache"
+      - "run_tiered_randomness_checks"
+    release_gate:
+      precision_min: 0.95
+      recall_min: 0.95
+      negative_control_false_positives_allowed: 0
+      repeated_runs_min: 10
+      budget_compliance_required: true
+    score_weights:
+      misuse_recall: 0.55
+      classification_precision: 0.20
+      negative_control_suppression: 0.15
+      request_budget: 0.10
+    target_ids:
+      - C-01
+      - C-02
+      - C-03
+      - C-04
+      - C-05
+      - C-06
+      - C-07
+    negative_control_ids:
+      - C-NC-01
+      - C-NC-02
+      - C-NC-03
+    recommended_base_url: "http://localhost:9000"
 
 phase01_contract:
   spec_version: "1.0"
@@ -327,6 +387,121 @@ phase02_contract:
     - "true_negative"
     - "inconclusive"
 
+phase03_contract:
+  spec_version: "1.0"
+  spec_paths:
+    suite_spec: "benchmarks/phase03-spec.md"
+    scoring_spec: "benchmarks/phase03-scoring-spec.md"
+    report_schema: "benchmarks/phase03-report.schema.json"
+  surface_kinds:
+    - "encryption_oracle"
+    - "hash_oracle"
+    - "token_issuer"
+    - "jwt_auth_surface"
+  suite_categories:
+    - "ECBMode"
+    - "StaticIV"
+    - "WeakHash"
+    - "InsecureRandom"
+    - "JWTAlgConfusion"
+  input_contract:
+    allowed_schemes: ["http", "https"]
+    canonicalization:
+      lowercase_scheme_host: true
+      default_http_port: 80
+      default_https_port: 443
+      normalize_empty_path_to_slash: true
+      strip_query_for_target_identity: true
+      strip_fragment: true
+    redirect_policy:
+      same_origin_max_hops: 1
+      cross_origin_result: "inconclusive"
+    discovery_dependency:
+      required_suite: "phase02"
+      allowed_reuse_same_origin_discoveries: true
+    probe_payloads:
+      encryption_repeated_block_bytes: 64
+      encryption_repeat_count: 2
+      token_sample_count: 16
+      jwt_issue_request_required: true
+  request_accounting:
+    action_types:
+      - "descriptor_fetch"
+      - "encryption_probe"
+      - "hash_probe"
+      - "token_fetch"
+      - "jwt_issue"
+      - "jwt_validation"
+      - "retry"
+      - "redirect_follow"
+    retry_policy:
+      max_retries_per_action: 1
+      count_retries_as_actions: true
+  normalization:
+    same_origin_required: true
+    method_normalization: "uppercase"
+    dedupe_key:
+      - "endpoint_url"
+      - "category"
+      - "algorithm"
+    hash_algorithm_aliases:
+      SHA1: "SHA-1"
+      sha1: "SHA-1"
+      sha-1: "SHA-1"
+      md5: "MD5"
+    jwt_algorithm_aliases:
+      alg=none: "JWT-none"
+      JWT-none: "JWT-none"
+      RS256->HS256: "JWT-RS256-to-HS256"
+      HS256-with-public-key: "JWT-RS256-to-HS256"
+  evidence_contract:
+    common_required_keys:
+      - "observation_ids"
+      - "base_url"
+      - "collected_via"
+      - "captured_at"
+      - "source_discovery_id"
+      - "endpoint_url"
+      - "endpoint_path"
+      - "methods"
+      - "surface_kind"
+      - "probe_strategy"
+    by_category:
+      ECBMode:
+        - "ciphertext_encoding"
+        - "ciphertext_length_bytes"
+        - "block_size_bytes"
+        - "repeated_block_count"
+        - "repeated_block_indexes"
+      StaticIV:
+        - "ciphertext_encoding"
+        - "repeated_request_count"
+        - "ciphertexts_equal"
+        - "ivs_equal"
+      WeakHash:
+        - "digest_encoding"
+        - "digest_length_chars"
+        - "exact_match_algorithm"
+        - "candidate_algorithms"
+      InsecureRandom:
+        - "sample_count"
+        - "token_field"
+        - "lcg_detected"
+        - "lcg_recurrence_match_ratio"
+        - "modulus_guess"
+      JWTAlgConfusion:
+        - "issued_token_header_alg"
+        - "exploit_variant"
+        - "exploit_response_authenticated"
+        - "response_status_code"
+  verdict_statuses:
+    - "matched"
+    - "missed"
+    - "false_positive"
+    - "duplicate_false_positive"
+    - "true_negative"
+    - "inconclusive"
+
 phase02_targets:
   D-01:
     name: "ECB encryption surface"
@@ -439,6 +614,80 @@ phase02_negative_controls:
     endpoint_path: "/api/profile"
     methods: ["GET"]
     surface_kind: "non_crypto"
+
+phase03_targets:
+  C-01:
+    name: "ECB mode classification"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/encrypt"
+    methods: ["POST"]
+    surface_kind: "encryption_oracle"
+    mapped_benchmark: "BM-01"
+  C-02:
+    name: "Static IV classification"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/encrypt-cbc-static"
+    methods: ["POST"]
+    surface_kind: "encryption_oracle"
+    mapped_benchmark: "BM-02"
+  C-03:
+    name: "MD5 weak hash classification"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/hash"
+    methods: ["POST"]
+    surface_kind: "hash_oracle"
+    mapped_benchmark: "BM-03"
+  C-04:
+    name: "SHA-1 weak hash classification"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/hash-sha1"
+    methods: ["POST"]
+    surface_kind: "hash_oracle"
+    mapped_benchmark: "BM-04"
+  C-05:
+    name: "LCG token classification"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/token"
+    methods: ["GET"]
+    surface_kind: "token_issuer"
+    mapped_benchmark: "BM-05"
+  C-06:
+    name: "JWT alg=none classification"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/auth"
+    methods: ["POST"]
+    surface_kind: "jwt_auth_surface"
+    mapped_benchmark: "BM-07"
+  C-07:
+    name: "JWT RS256 to HS256 classification"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/auth-rsa"
+    methods: ["POST"]
+    surface_kind: "jwt_auth_surface"
+    mapped_benchmark: "BM-08"
+
+phase03_negative_controls:
+  C-NC-01:
+    name: "Authenticated encryption control"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/encrypt-strong"
+    methods: ["POST"]
+    surface_kind: "encryption_oracle"
+    mapped_benchmark: "NC-01"
+  C-NC-02:
+    name: "SHA-256 hashing control"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/hash-strong"
+    methods: ["POST"]
+    surface_kind: "hash_oracle"
+    mapped_benchmark: "NC-02"
+  C-NC-03:
+    name: "Secure token control"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/token-secure"
+    methods: ["GET"]
+    surface_kind: "token_issuer"
+    mapped_benchmark: "NC-03"
 
 # ============================================================
 # Misuse category mapping to standards

@@ -28,6 +28,7 @@ from bbci.phase01 import (
     normalize_signature_algorithm,
 )
 from bbci.phase02 import canonicalize_endpoint_url, normalize_methods
+from bbci.phase03 import normalize_hash_algorithm, normalize_jwt_variant
 
 
 @dataclass
@@ -62,6 +63,7 @@ class BenchmarkScore:
     benchmark_verdicts: list[dict[str, Any]] = field(default_factory=list)
     phase01_reports: list[dict[str, Any]] = field(default_factory=list)
     phase02_reports: list[dict[str, Any]] = field(default_factory=list)
+    phase03_reports: list[dict[str, Any]] = field(default_factory=list)
 
     per_benchmark: dict[str, dict[str, Any]] = field(default_factory=dict)
     per_channel: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -71,6 +73,7 @@ class BenchmarkScore:
     budget_compliance_rate: float = 0.0
     inconclusive_rate: float = 0.0
     mean_time_to_first_relevant_seconds: float = 0.0
+    mean_time_to_first_classification_seconds: float = 0.0
 
     @property
     def precision(self) -> float:
@@ -112,6 +115,9 @@ class BenchmarkScore:
             "inconclusive_rate": round(self.inconclusive_rate, 4),
             "mean_time_to_first_relevant_seconds": round(
                 self.mean_time_to_first_relevant_seconds, 4
+            ),
+            "mean_time_to_first_classification_seconds": round(
+                self.mean_time_to_first_classification_seconds, 4
             ),
             "per_benchmark": self.per_benchmark,
             "per_channel": self.per_channel,
@@ -249,6 +255,69 @@ def _phase02_discovery_evidence_valid(discovery: dict[str, Any], contract: dict[
     source_urls = evidence.get("source_urls", [])
     if not isinstance(source_urls, list) or not source_urls:
         return False
+    return True
+
+
+def _normalize_phase03_algorithm(category: str, algorithm: str) -> str:
+    if category == "WeakHash":
+        return normalize_hash_algorithm(algorithm)
+    if category == "JWTAlgConfusion":
+        return normalize_jwt_variant(algorithm)
+    return algorithm
+
+
+def _phase03_classification_evidence_valid(
+    classification: dict[str, Any], contract: dict[str, Any], category: str, algorithm: str
+) -> bool:
+    evidence = classification.get("evidence", {})
+    if not isinstance(evidence, dict):
+        return False
+    required_keys = list(contract.get("evidence_contract", {}).get("common_required_keys", []))
+    required_keys += list(
+        contract.get("evidence_contract", {}).get("by_category", {}).get(category, [])
+    )
+    for key in required_keys:
+        if key not in evidence:
+            return False
+
+    if evidence.get("endpoint_url") != classification.get("endpoint_url"):
+        return False
+    if evidence.get("endpoint_path") != classification.get("endpoint_path"):
+        return False
+    if evidence.get("surface_kind") != classification.get("surface_kind"):
+        return False
+
+    if category == "ECBMode":
+        return (
+            evidence.get("ciphertext_encoding") == "base64"
+            and evidence.get("block_size_bytes") == 16
+            and evidence.get("repeated_block_count", 0) >= 1
+            and isinstance(evidence.get("repeated_block_indexes"), list)
+            and bool(evidence.get("repeated_block_indexes"))
+        )
+    if category == "StaticIV":
+        return (
+            evidence.get("ciphertext_encoding") == "base64"
+            and evidence.get("repeated_request_count", 0) >= 2
+            and evidence.get("ciphertexts_equal") is True
+            and evidence.get("ivs_equal") is True
+        )
+    if category == "WeakHash":
+        return normalize_hash_algorithm(evidence.get("exact_match_algorithm", "")) == algorithm
+    if category == "InsecureRandom":
+        return (
+            evidence.get("sample_count", 0) >= 8
+            and evidence.get("lcg_detected") is True
+            and float(evidence.get("lcg_recurrence_match_ratio", 0.0)) >= 0.95
+            and evidence.get("modulus_guess") == 2**31
+        )
+    if category == "JWTAlgConfusion":
+        return (
+            normalize_jwt_variant(evidence.get("exploit_variant", "")) == algorithm
+            and evidence.get("exploit_response_authenticated") is True
+            and isinstance(evidence.get("response_status_code"), int)
+            and evidence["response_status_code"] < 400
+        )
     return True
 
 
@@ -438,6 +507,250 @@ def score_phase02_reports(
             discovery.get("endpoint_url") == endpoint_url for discovery in all_discoveries
         )
         passed = not discovered
+        score.negative_control_results.append(
+            {
+                "id": nc_id,
+                "name": nc_def["name"],
+                "passed": passed,
+                "endpoint_url": endpoint_url,
+            }
+        )
+        if passed:
+            score.true_negatives += 1
+
+    return score
+
+
+def score_phase03_reports(
+    reports: list[dict[str, Any]],
+    ground_truth_path: str = "benchmarks/ground_truth.yaml",
+    target_ids: list[str] | None = None,
+    negative_control_ids: list[str] | None = None,
+) -> BenchmarkScore:
+    """Score phase03 classification reports against the phase03 contract."""
+    gt = load_ground_truth(ground_truth_path)
+    contract = gt.get("phase03_contract", {})
+    suite = gt.get("benchmark_suites", {}).get("phase03", {})
+    targets = gt.get("phase03_targets", {})
+    negative_controls = gt.get("phase03_negative_controls", {})
+    benchmarks = gt.get("benchmarks", {})
+
+    score = BenchmarkScore()
+    score.phase03_reports = reports
+
+    selected_target_ids = target_ids or list(suite.get("target_ids", []))
+    selected_negative_control_ids = negative_control_ids or list(
+        suite.get("negative_control_ids", [])
+    )
+
+    expected_units: list[tuple[str, str, str, str, str, list[str], float]] = []
+    for target_id in selected_target_ids:
+        target = targets[target_id]
+        mapped_benchmark = target["mapped_benchmark"]
+        benchmark = benchmarks[mapped_benchmark]
+        expected_finding = benchmark["expected_findings"][0]
+        endpoint_url = canonicalize_endpoint_url(target["target_url"], target["endpoint_path"])
+        expected_methods = normalize_methods(target.get("methods"))
+        score.per_benchmark[target_id] = {
+            "name": target["name"],
+            "expected": 1,
+            "detected": 0,
+            "findings": [],
+        }
+        expected_units.append(
+            (
+                target_id,
+                endpoint_url,
+                target["surface_kind"],
+                expected_finding["category"],
+                _normalize_phase03_algorithm(
+                    expected_finding["category"], expected_finding.get("algorithm", "")
+                ),
+                expected_methods,
+                expected_finding.get("min_confidence", 0.5),
+            )
+        )
+
+    score.total_expected = len(expected_units)
+
+    allowed_endpoint_urls = {
+        canonicalize_endpoint_url(
+            targets[target_id]["target_url"],
+            targets[target_id]["endpoint_path"],
+        )
+        for target_id in selected_target_ids
+    }
+    allowed_endpoint_urls.update(
+        canonicalize_endpoint_url(
+            negative_controls[nc_id]["target_url"],
+            negative_controls[nc_id]["endpoint_path"],
+        )
+        for nc_id in selected_negative_control_ids
+    )
+
+    in_scope_categories = set(contract.get("suite_categories", []))
+    all_classifications: list[dict[str, Any]] = []
+    for report in reports:
+        for classification in report.get("classifications", []):
+            if (
+                classification.get("endpoint_url") in allowed_endpoint_urls
+                and classification.get("category") in in_scope_categories
+            ):
+                all_classifications.append(classification)
+    score.total_detected = len(all_classifications)
+
+    matched_ids: set[str] = set()
+    duplicate_ids: set[str] = set()
+    ttfc_values: list[float] = []
+    budget_reports = 0
+    budget_compliant_reports = 0
+    inconclusive_reports = 0
+
+    for (
+        target_id,
+        endpoint_url,
+        surface_kind,
+        category,
+        algorithm,
+        expected_methods,
+        min_confidence,
+    ) in expected_units:
+        candidates = []
+        for classification in all_classifications:
+            if classification.get("id") in matched_ids:
+                continue
+            if classification.get("endpoint_url") != endpoint_url:
+                continue
+            if classification.get("surface_kind") != surface_kind:
+                continue
+            if classification.get("category") != category:
+                continue
+            normalized_algorithm = _normalize_phase03_algorithm(
+                category, classification.get("algorithm", "")
+            )
+            if normalized_algorithm != algorithm:
+                continue
+            observed_methods = normalize_methods(classification.get("methods", []))
+            if expected_methods and not set(observed_methods).intersection(expected_methods):
+                continue
+            if not _phase03_classification_evidence_valid(
+                classification, contract, category, algorithm
+            ):
+                continue
+            candidates.append(classification)
+
+        candidates.sort(
+            key=lambda item: (
+                -float(item.get("confidence", 0.0)),
+                item.get("id", ""),
+            )
+        )
+
+        if candidates:
+            chosen = candidates[0]
+            matched_ids.add(chosen["id"])
+            for duplicate in candidates[1:]:
+                duplicate_ids.add(duplicate["id"])
+            score.true_positives += 1
+            score.per_benchmark[target_id]["detected"] += 1
+            score.confidence_calibration.append(
+                {
+                    "benchmark": target_id,
+                    "expected_min": min_confidence,
+                    "actual": chosen.get("confidence", 0.0),
+                    "meets_threshold": chosen.get("confidence", 0.0) >= min_confidence,
+                }
+            )
+            score.benchmark_verdicts.append(
+                {
+                    "benchmark_id": target_id,
+                    "endpoint_url": endpoint_url,
+                    "status": "matched",
+                    "category": category,
+                    "algorithm": algorithm,
+                }
+            )
+            score.matches.append(
+                MatchResult(
+                    benchmark_id=target_id,
+                    expected_category=category,
+                    expected_algorithm=algorithm,
+                    matched=True,
+                    matched_finding_id=chosen.get("id"),
+                    matched_confidence=chosen.get("confidence", 0.0),
+                    expected_min_confidence=min_confidence,
+                )
+            )
+        else:
+            score.false_negatives += 1
+            score.benchmark_verdicts.append(
+                {
+                    "benchmark_id": target_id,
+                    "endpoint_url": endpoint_url,
+                    "status": "missed",
+                    "category": category,
+                    "algorithm": algorithm,
+                }
+            )
+            score.matches.append(
+                MatchResult(
+                    benchmark_id=target_id,
+                    expected_category=category,
+                    expected_algorithm=algorithm,
+                    matched=False,
+                    expected_min_confidence=min_confidence,
+                    notes="Not classified",
+                )
+            )
+
+    for classification in all_classifications:
+        classification_id = classification.get("id", "")
+        if classification_id in matched_ids:
+            continue
+        score.false_positives += 1
+        if classification_id in duplicate_ids:
+            score.duplicate_false_positives += 1
+        score.false_positive_findings.append(classification)
+
+    for target_id in selected_target_ids:
+        mapped_benchmark = targets[target_id]["mapped_benchmark"]
+        for channel in benchmarks[mapped_benchmark].get("detection_channels", []):
+            if channel not in score.per_channel:
+                score.per_channel[channel] = {"expected": 0, "detected": 0}
+            score.per_channel[channel]["expected"] += 1
+            score.per_channel[channel]["detected"] += score.per_benchmark[target_id]["detected"]
+
+    for report in reports:
+        request_accounting = report.get("request_accounting", {})
+        if request_accounting:
+            budget_reports += 1
+            if request_accounting.get("budget_compliant"):
+                budget_compliant_reports += 1
+        if any(
+            verdict.get("status") == "inconclusive"
+            for verdict in report.get("benchmark_verdicts", [])
+        ):
+            inconclusive_reports += 1
+        ttfc = report.get("summary", {}).get("time_to_first_classification_seconds")
+        if isinstance(ttfc, (int, float)):
+            ttfc_values.append(float(ttfc))
+
+    score.budget_compliance_rate = (
+        budget_compliant_reports / budget_reports if budget_reports else 0.0
+    )
+    score.inconclusive_rate = inconclusive_reports / len(reports) if reports else 0.0
+    score.mean_time_to_first_classification_seconds = (
+        sum(ttfc_values) / len(ttfc_values) if ttfc_values else 0.0
+    )
+
+    for nc_id in selected_negative_control_ids:
+        nc_def = negative_controls[nc_id]
+        endpoint_url = canonicalize_endpoint_url(nc_def["target_url"], nc_def["endpoint_path"])
+        classified = any(
+            classification.get("endpoint_url") == endpoint_url
+            for classification in all_classifications
+        )
+        passed = not classified
         score.negative_control_results.append(
             {
                 "id": nc_id,
