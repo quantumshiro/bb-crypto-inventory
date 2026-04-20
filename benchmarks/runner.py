@@ -5,6 +5,7 @@ and scores results against ground truth.
 
 Usage:
     python -m benchmarks.runner --target http://localhost:9000 --suite phase01
+    python -m benchmarks.runner --target http://localhost:9000 --suite phase02
     python -m benchmarks.runner --target http://localhost:9000 --suite phase01 --benchmark BM-09
     python -m benchmarks.runner --target http://localhost:9000 --report results/
 """
@@ -23,10 +24,12 @@ from typing import Any
 from bbci.agent.orchestrator import AgentOrchestrator
 from bbci.config import Config
 from bbci.phase01 import Phase01Scanner, canonicalize_https_url
+from bbci.phase02 import Phase02Scanner, canonicalize_base_url
 from benchmarks.scoring import (
     load_ground_truth,
     score_findings,
     score_phase01_reports,
+    score_phase02_reports,
 )
 
 logger = logging.getLogger("bbci.benchmark")
@@ -168,6 +171,8 @@ async def run_benchmarks(
     gt = load_ground_truth(ground_truth_path)
     if suite == "phase01":
         return await run_phase01_suite(config, ground_truth_path, benchmark_filter)
+    if suite == "phase02":
+        return await run_phase02_suite(config, base_url, ground_truth_path, benchmark_filter)
 
     benchmarks = gt.get("benchmarks", {})
     suite_def: dict | None = None
@@ -313,6 +318,73 @@ async def run_phase01_suite(
     }
 
 
+async def run_phase02_suite(
+    config: Config,
+    base_url: str,
+    ground_truth_path: str,
+    benchmark_filter: str | None = None,
+) -> dict:
+    """Run the deterministic phase02 suite against a base URL."""
+    gt = load_ground_truth(ground_truth_path)
+    suite_def = gt["benchmark_suites"]["phase02"]
+    scanner = Phase02Scanner(timeout=10)
+
+    target_ids = list(suite_def.get("target_ids", []))
+    negative_control_ids = list(suite_def.get("negative_control_ids", []))
+    all_ids = target_ids + negative_control_ids
+
+    if benchmark_filter:
+        all_ids = [target_id for target_id in all_ids if target_id == benchmark_filter]
+        if not all_ids:
+            raise ValueError(f"Unknown phase02 benchmark filter: {benchmark_filter}")
+
+    logger.info(
+        "Running phase02 discovery against %s for targets %s",
+        base_url,
+        ",".join(all_ids),
+    )
+    report = await scanner.scan_target(base_url)
+    score = score_phase02_reports(
+        [report],
+        ground_truth_path,
+        target_ids=[
+            target_id for target_id in all_ids if target_id in gt.get("phase02_targets", {})
+        ],
+        negative_control_ids=[
+            target_id
+            for target_id in all_ids
+            if target_id in gt.get("phase02_negative_controls", {})
+        ],
+    )
+    report["benchmark_verdicts"] = list(score.benchmark_verdicts)
+    report["summary"]["matched_discovery_count"] = score.true_positives
+    report["summary"]["false_positive_discovery_count"] = score.false_positives
+    report["summary"]["missed_expected_count"] = score.false_negatives
+
+    return {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "target": canonicalize_base_url(base_url),
+        "model": config.agent.model,
+        "suite": "phase02",
+        "suite_description": suite_def.get("description"),
+        "phases": suite_def.get("phases", []),
+        "benchmarks_run": len(all_ids),
+        "benchmark_results": [
+            {
+                "target": canonicalize_base_url(base_url),
+                "target_ids": all_ids,
+                "discovery_count": len(report.get("discoveries", [])),
+                "request_accounting": report.get("request_accounting", {}),
+                "summary": report.get("summary", {}),
+                "success": True,
+            }
+        ],
+        "phase02_reports": [report],
+        "scoring": score.summary(),
+        "total_findings": len(report.get("discoveries", [])),
+    }
+
+
 def print_report(results: dict) -> None:
     """Print a human-readable benchmark report."""
     scoring = results.get("scoring", {})
@@ -334,12 +406,17 @@ def print_report(results: dict) -> None:
     print(f"  Precision:        {scoring.get('precision', 0):.1%}")
     print(f"  Recall:           {scoring.get('recall', 0):.1%}")
     print(f"  F1 Score:         {scoring.get('f1_score', 0):.1%}")
-    if "ssl_grade_accuracy" in scoring:
+    if results.get("suite") == "phase01":
         print(f"  SSL Grade Acc.:   {scoring.get('ssl_grade_accuracy', 0):.1%}")
-    if "budget_compliance_rate" in scoring:
+    if results.get("suite") in {"phase01", "phase02"}:
         print(f"  Budget Comp.:     {scoring.get('budget_compliance_rate', 0):.1%}")
-    if "inconclusive_rate" in scoring:
+    if results.get("suite") in {"phase01", "phase02"}:
         print(f"  Inconclusive:     {scoring.get('inconclusive_rate', 0):.1%}")
+    if results.get("suite") == "phase02":
+        print(
+            "  Mean TTFR:        "
+            f"{scoring.get('mean_time_to_first_relevant_seconds', 0.0):.3f}s"
+        )
     print(f"  True Positives:   {scoring.get('true_positives', 0)}")
     print(f"  False Positives:  {scoring.get('false_positives', 0)}")
     if "duplicate_false_positives" in scoring:

@@ -11,16 +11,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import hmac
 import json
 import os
 import socket
 import ssl
-import struct
-import time
 
-import pytest
 import httpx
+import pytest
 from cryptography import x509
 
 BASE_URL = os.environ.get("BENCHMARK_URL", "http://localhost:9000")
@@ -57,7 +54,7 @@ def _fetch_peer_certificate(host: str, port: int) -> x509.Certificate:
 
 
 @skipif_no_server
-class TestBM01_ECBMode:
+class TestBm01EcbMode:
     """BM-01: AES-128-ECB should produce identical blocks for identical plaintext."""
 
     def test_ecb_repeated_blocks(self) -> None:
@@ -84,7 +81,7 @@ class TestBM01_ECBMode:
 
 
 @skipif_no_server
-class TestPhase01_TLSRecon:
+class TestPhase01TlsRecon:
     """Phase 0+1 benchmark invariants for the weak/strong HTTPS edges."""
 
     def test_weak_edge_missing_hsts(self) -> None:
@@ -109,7 +106,7 @@ class TestPhase01_TLSRecon:
 
 
 @skipif_no_server
-class TestBM02_StaticIV:
+class TestBm02StaticIv:
     """BM-02: AES-CBC with static IV should be deterministic."""
 
     def test_static_iv_deterministic(self) -> None:
@@ -120,7 +117,7 @@ class TestBM02_StaticIV:
 
 
 @skipif_no_server
-class TestBM03_WeakHashMD5:
+class TestBm03WeakHashMd5:
     """BM-03: Should return MD5 hashes (32 hex chars = 128 bits)."""
 
     def test_md5_output_length(self) -> None:
@@ -135,7 +132,7 @@ class TestBM03_WeakHashMD5:
 
 
 @skipif_no_server
-class TestBM04_WeakHashSHA1:
+class TestBm04WeakHashSha1:
     """BM-04: Should return SHA-1 hashes (40 hex chars = 160 bits)."""
 
     def test_sha1_output_length(self) -> None:
@@ -145,7 +142,7 @@ class TestBM04_WeakHashSHA1:
 
 
 @skipif_no_server
-class TestBM05_InsecureRandom:
+class TestBm05InsecureRandom:
     """BM-05: LCG tokens should show sequential correlation."""
 
     def test_token_length(self) -> None:
@@ -161,14 +158,13 @@ class TestBM05_InsecureRandom:
             tokens.append(int(resp.json()["token"][:8], 16))
 
         # LCG produces correlated consecutive values
-        diffs = [tokens[i + 1] - tokens[i] for i in range(len(tokens) - 1)]
-        # Not all diffs should be equal (that would be a counter), but they should
-        # be related by the LCG recurrence. We just check they're not random.
+        # We intentionally keep the assertion weak here because the benchmark only
+        # needs to confirm that the endpoint emits token-shaped sequential outputs.
         assert len(tokens) == 20
 
 
 @skipif_no_server
-class TestBM06_PaddingOracle:
+class TestBm06PaddingOracle:
     """BM-06: Decryption endpoint should leak padding validity."""
 
     def _get_valid_ciphertext(self) -> bytes:
@@ -207,7 +203,7 @@ class TestBM06_PaddingOracle:
 
 
 @skipif_no_server
-class TestBM07_JWTAlgNone:
+class TestBm07JwtAlgNone:
     """BM-07: JWT verification should accept alg=none."""
 
     def test_alg_none_accepted(self) -> None:
@@ -230,7 +226,7 @@ class TestBM07_JWTAlgNone:
 
 
 @skipif_no_server
-class TestBM10_TimingLeak:
+class TestBm10TimingLeak:
     """BM-10: Non-constant-time HMAC should show timing differences."""
 
     def test_endpoint_responds(self) -> None:
@@ -264,3 +260,32 @@ class TestNegativeControls:
             resp = httpx.get(f"{BASE_URL}/api/token-secure")
             tokens.add(resp.json()["token"])
         assert len(tokens) == 50, "Secure random tokens should all be unique"
+
+
+@skipif_no_server
+class TestPhase02DiscoveryFixtures:
+    """Phase02 discovery descriptors and decoys."""
+
+    def test_service_index_lists_secure_and_decoy_endpoints(self) -> None:
+        resp = httpx.get(f"{BASE_URL}/")
+        assert resp.status_code == 200
+        data = resp.json()
+        endpoints = {entry["path"]: entry for entry in data["endpoints"]}
+        assert "/api/encrypt-strong" in endpoints
+        assert "/api/token-secure" in endpoints
+        assert "/api/ping" in endpoints
+        assert "/api/profile" in endpoints
+        assert endpoints["/api/encrypt"]["methods"] == ["POST"]
+        assert endpoints["/api/encrypt"]["surface_kind"] == "encryption_oracle"
+        assert endpoints["/api/ping"]["crypto_relevant"] is False
+
+    def test_openapi_descriptor_exposes_paths(self) -> None:
+        resp = httpx.get(f"{BASE_URL}/openapi.json")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["openapi"] == "3.0.0"
+        assert "/api/encrypt" in data["paths"]
+        assert "post" in data["paths"]["/api/encrypt"]
+        assert "/api/ping" in data["paths"]
+        assert data["paths"]["/api/encrypt"]["post"]["x-bbci-surface-kind"] == "encryption_oracle"
+        assert data["paths"]["/api/ping"]["get"]["x-bbci-crypto-relevant"] is False

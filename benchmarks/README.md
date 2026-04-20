@@ -2,14 +2,19 @@
 
 Blackbox cryptographic benchmark suite for evaluating `bbci` detection capabilities.
 
-The first stabilized suite is `phase01`: a URL-scoped benchmark for Recon (Phase 0)
-and Protocol Layer testing (Phase 1).
+The first stabilized suites are:
+
+- `phase01`: a URL-scoped benchmark for Recon (Phase 0) and Protocol Layer testing (Phase 1)
+- `phase02`: a base-URL-scoped benchmark for application-surface discovery (Phase 2)
 
 The normative design artifacts are:
 
 - [phase01-spec.md](./phase01-spec.md)
 - [phase01-scoring-spec.md](./phase01-scoring-spec.md)
 - [phase01-report.schema.json](./phase01-report.schema.json)
+- [phase02-spec.md](./phase02-spec.md)
+- [phase02-scoring-spec.md](./phase02-scoring-spec.md)
+- [phase02-report.schema.json](./phase02-report.schema.json)
 - [ground_truth.yaml](./ground_truth.yaml)
 
 ## Standards Alignment
@@ -90,14 +95,52 @@ Following CamBench/CryptoAPI-Bench evaluation practice:
 | Header-only baseline | Phase 0 Recon only | Deterministic heuristic |
 | CryptoScope LLM | Static (whitebox) | LLM-based |
 
+## Phase 2 Discovery Suite
+
+`phase02` starts from a supplied application base URL and scores whether the
+scanner can discover the crypto-relevant HTTP surfaces needed by later suites.
+
+- **Evaluation mode**: base-URL-scoped same-origin discovery
+- **What it scores**: service-index/OpenAPI fetch, candidate extraction,
+  endpoint normalization, and crypto-surface classification
+- **What it does not score yet**: vulnerability classification, active probing,
+  or timing/randomness analysis
+- **Classification rule**: explicit descriptor metadata such as `surface_kind`
+  or `x-bbci-surface-kind` takes precedence over heuristic inference
+
+### Positive Targets
+
+| ID | Endpoint | Surface Kind |
+|----|----------|--------------|
+| D-01 | `/api/encrypt` | `encryption_oracle` |
+| D-02 | `/api/encrypt-cbc-static` | `encryption_oracle` |
+| D-03 | `/api/encrypt-strong` | `encryption_oracle` |
+| D-04 | `/api/hash` | `hash_oracle` |
+| D-05 | `/api/hash-sha1` | `hash_oracle` |
+| D-06 | `/api/hash-strong` | `hash_oracle` |
+| D-07 | `/api/token` | `token_issuer` |
+| D-08 | `/api/token-secure` | `token_issuer` |
+| D-09 | `/api/decrypt` | `decryption_oracle` |
+| D-10 | `/api/auth` | `jwt_auth_surface` |
+| D-11 | `/api/auth-rsa` | `jwt_auth_surface` |
+| D-12 | `/api/verify-hmac` | `hmac_verifier` |
+| D-13 | `/api/verify-hmac-secure` | `hmac_verifier` |
+
+### Negative Controls
+
+| ID | Endpoint | Expected Result |
+|----|----------|-----------------|
+| D-NC-01 | `/health` | Must not be reported as crypto-relevant |
+| D-NC-02 | `/api/ping` | Must not be reported as crypto-relevant |
+| D-NC-03 | `/api/profile` | Must not be reported as crypto-relevant |
+
 ## Full-Suite Backlog
 
 Draft definitions for later suites remain in the repository, but they are not the first suite to stabilize:
 
-- CH2: ECB mode, static IV
-- CH5: MD5, SHA-1, JWT confusion
-- CH6: weak randomness
-- CH3/CH4: padding oracle, timing leak
+- CH2/CH5 classification of the discovered application surfaces
+- CH6 weak randomness assessment
+- CH3/CH4 active oracle and timing validation
 
 Those will become separate suites after the Phase 0+1 benchmark is dependable.
 
@@ -115,6 +158,9 @@ pytest benchmarks/test_servers.py -v
 
 # Run the stabilized Phase 0+1 suite
 python -m benchmarks.runner --target http://localhost:9000 --suite phase01
+
+# Run the stabilized Phase 2 discovery suite
+python -m benchmarks.runner --target http://localhost:9000 --suite phase02
 
 # Run a single target from that suite
 python -m benchmarks.runner --target http://localhost:9000 --suite phase01 --benchmark BM-09

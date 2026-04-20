@@ -14,12 +14,11 @@ import json
 import os
 import struct
 import time
-from functools import wraps
 
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding as sym_padding
-from cryptography.hazmat.primitives.asymmetric import rsa, padding as asym_padding
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
@@ -404,7 +403,7 @@ def verify_hmac_secure():
     message = data["message"].encode()
     expected = hmac.new(HMAC_SECRET, message, hashlib.sha256).hexdigest()
 
-    if hmac.compare_digest(provided_mac := data["mac"], expected):
+    if hmac.compare_digest(data["mac"], expected):
         return jsonify({"valid": True}), 200
     return jsonify({"valid": False}), 401
 
@@ -418,23 +417,202 @@ def health():
     return jsonify({"status": "ok", "benchmarks": 10})
 
 
+@app.route("/api/ping")
+def ping():
+    return jsonify({"pong": True, "service": "bbci-benchmark-server"})
+
+
+@app.route("/api/profile")
+def profile():
+    return jsonify({"user": "benchmark-user", "role": "tester"})
+
+
+def _endpoint_catalog() -> list[dict[str, object]]:
+    return [
+        {
+            "path": "/api/encrypt",
+            "methods": ["POST"],
+            "benchmark": "BM-01",
+            "vuln": "ECB Mode",
+            "summary": "Encrypt arbitrary data and return ciphertext",
+            "surface_kind": "encryption_oracle",
+            "crypto_relevant": True,
+        },
+        {
+            "path": "/api/encrypt-cbc-static",
+            "methods": ["POST"],
+            "benchmark": "BM-02",
+            "vuln": "Static IV",
+            "summary": "Encrypt arbitrary data with CBC mode",
+            "surface_kind": "encryption_oracle",
+            "crypto_relevant": True,
+        },
+        {
+            "path": "/api/encrypt-strong",
+            "methods": ["POST"],
+            "benchmark": "NC-01",
+            "vuln": "Strong encryption control",
+            "summary": "Encrypt arbitrary data with authenticated encryption",
+            "surface_kind": "encryption_oracle",
+            "crypto_relevant": True,
+        },
+        {
+            "path": "/api/hash",
+            "methods": ["POST"],
+            "benchmark": "BM-03",
+            "vuln": "MD5",
+            "summary": "Hash arbitrary data and return digest",
+            "surface_kind": "hash_oracle",
+            "crypto_relevant": True,
+        },
+        {
+            "path": "/api/hash-sha1",
+            "methods": ["POST"],
+            "benchmark": "BM-04",
+            "vuln": "SHA-1",
+            "summary": "Hash arbitrary data and return digest",
+            "surface_kind": "hash_oracle",
+            "crypto_relevant": True,
+        },
+        {
+            "path": "/api/hash-strong",
+            "methods": ["POST"],
+            "benchmark": "NC-02",
+            "vuln": "Strong hash control",
+            "summary": "Hash arbitrary data and return digest",
+            "surface_kind": "hash_oracle",
+            "crypto_relevant": True,
+        },
+        {
+            "path": "/api/token",
+            "methods": ["GET"],
+            "benchmark": "BM-05",
+            "vuln": "Insecure Random (LCG)",
+            "summary": "Issue session token",
+            "surface_kind": "token_issuer",
+            "crypto_relevant": True,
+        },
+        {
+            "path": "/api/token-secure",
+            "methods": ["GET"],
+            "benchmark": "NC-03",
+            "vuln": "Secure random control",
+            "summary": "Issue session token",
+            "surface_kind": "token_issuer",
+            "crypto_relevant": True,
+        },
+        {
+            "path": "/api/decrypt",
+            "methods": ["POST"],
+            "benchmark": "BM-06",
+            "vuln": "Padding Oracle",
+            "summary": "Decrypt ciphertext and return plaintext",
+            "surface_kind": "decryption_oracle",
+            "crypto_relevant": True,
+        },
+        {
+            "path": "/api/auth",
+            "methods": ["POST"],
+            "benchmark": "BM-07",
+            "vuln": "JWT alg=none",
+            "summary": "Authenticate bearer token",
+            "surface_kind": "jwt_auth_surface",
+            "crypto_relevant": True,
+        },
+        {
+            "path": "/api/auth-rsa",
+            "methods": ["POST"],
+            "benchmark": "BM-08",
+            "vuln": "JWT RS256→HS256",
+            "summary": "Authenticate bearer token using RSA public key",
+            "surface_kind": "jwt_auth_surface",
+            "crypto_relevant": True,
+        },
+        {
+            "path": "/api/verify-hmac",
+            "methods": ["POST"],
+            "benchmark": "BM-10",
+            "vuln": "Timing Leak",
+            "summary": "Verify HMAC over a message",
+            "surface_kind": "hmac_verifier",
+            "crypto_relevant": True,
+        },
+        {
+            "path": "/api/verify-hmac-secure",
+            "methods": ["POST"],
+            "benchmark": "NC-03",
+            "vuln": "Constant-time HMAC control",
+            "summary": "Verify HMAC over a message",
+            "surface_kind": "hmac_verifier",
+            "crypto_relevant": True,
+        },
+        {
+            "path": "/api/ping",
+            "methods": ["GET"],
+            "benchmark": "D-NC-02",
+            "vuln": "Non-crypto decoy",
+            "summary": "Ping the service",
+            "surface_kind": "non_crypto",
+            "crypto_relevant": False,
+        },
+        {
+            "path": "/api/profile",
+            "methods": ["GET"],
+            "benchmark": "D-NC-03",
+            "vuln": "Non-crypto decoy",
+            "summary": "Fetch a user profile",
+            "surface_kind": "non_crypto",
+            "crypto_relevant": False,
+        },
+        {
+            "path": "/health",
+            "methods": ["GET"],
+            "benchmark": "D-NC-01",
+            "vuln": "Non-crypto decoy",
+            "summary": "Health check",
+            "surface_kind": "non_crypto",
+            "crypto_relevant": False,
+        },
+    ]
+
+
 @app.route("/")
 def index():
     return jsonify({
         "service": "bbci-benchmark-server",
         "version": "0.1.0",
-        "endpoints": [
-            {"path": "/api/encrypt", "benchmark": "BM-01", "vuln": "ECB Mode"},
-            {"path": "/api/encrypt-cbc-static", "benchmark": "BM-02", "vuln": "Static IV"},
-            {"path": "/api/hash", "benchmark": "BM-03", "vuln": "MD5"},
-            {"path": "/api/hash-sha1", "benchmark": "BM-04", "vuln": "SHA-1"},
-            {"path": "/api/token", "benchmark": "BM-05", "vuln": "Insecure Random (LCG)"},
-            {"path": "/api/decrypt", "benchmark": "BM-06", "vuln": "Padding Oracle"},
-            {"path": "/api/auth", "benchmark": "BM-07", "vuln": "JWT alg=none"},
-            {"path": "/api/auth-rsa", "benchmark": "BM-08", "vuln": "JWT RS256→HS256"},
-            {"path": "/api/verify-hmac", "benchmark": "BM-10", "vuln": "Timing Leak"},
-        ],
+        "endpoints": _endpoint_catalog(),
     })
+
+
+@app.route("/openapi.json")
+def openapi():
+    paths = {}
+    for endpoint in _endpoint_catalog():
+        operation = {
+            "summary": endpoint["summary"],
+            "description": endpoint["vuln"],
+            "operationId": endpoint["benchmark"],
+            "tags": [str(endpoint["benchmark"])],
+        }
+        path_entry = paths.setdefault(str(endpoint["path"]), {})
+        for method in endpoint["methods"]:
+            path_entry[str(method).lower()] = {
+                **operation,
+                "x-bbci-surface-kind": endpoint["surface_kind"],
+                "x-bbci-crypto-relevant": endpoint["crypto_relevant"],
+            }
+
+    return jsonify(
+        {
+            "openapi": "3.0.0",
+            "info": {
+                "title": "BBCI Benchmark Service",
+                "version": "0.1.0",
+            },
+            "paths": paths,
+        }
+    )
 
 
 if __name__ == "__main__":
