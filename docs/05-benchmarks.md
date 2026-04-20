@@ -21,7 +21,8 @@
 |------|---------|------|
 | **Phase01 MVP** | Recon + Protocol Layer | まず安定した基準スイートを作る |
 | **Phase02 MVP** | App surface discovery | 暗号関連 endpoint を見つけて分類できるかを測る |
-| Phase3 Suite | Oracle / Timing | 許諾環境向けの深い動的検査を測る |
+| **Phase03 MVP** | App misuse classification | 見つけた surface を bounded probe で誤分類なく判断できるかを測る |
+| Phase04 Suite | Oracle / Timing | 許諾環境向けの深い動的検査を測る |
 
 ## 5.2 Phase01 MVP の評価境界
 
@@ -309,25 +310,50 @@ Phase02 では later phase の脆弱/安全 endpoint の両方を **relevant sur
 | Header-only baseline | Phase 0 Recon only | 決定論的ヒューリスティック |
 | CryptoScope LLM | 静的解析（whitebox） | LLM ベース |
 
-## 5.9 後続フェーズ
+## 5.9 Phase03 Classification Suite
 
-Phase01 / Phase02 を固定した後、以下を別 suite として追加する：
+Phase03 は、Phase02 で見つけた same-origin surface に対して、bounded probe を
+使って app-layer misuse を deterministic に分類する suite である。
 
-1. **Phase3 Classification Suite**
-   - ECB
-   - Static IV
-   - WeakHash
-   - JWT confusion
-   - InsecureRandom
-2. **Phase4 Active Validation Suite**
+- positive target
+  - `C-01`: ECB
+  - `C-02`: Static IV
+  - `C-03`: MD5
+  - `C-04`: SHA-1
+  - `C-05`: InsecureRandom / LCG
+  - `C-06`: JWT `alg=none`
+  - `C-07`: JWT `RS256 -> HS256`
+- negative control
+  - `C-NC-01`: authenticated encryption
+  - `C-NC-02`: SHA-256
+  - `C-NC-03`: secure token issuer
+
+Phase03 が採点するのは次の能力である。
+
+- encryption oracle に repeated-block / same-plaintext probe を打てるか
+- hash oracle に known-input digest comparison を打てるか
+- token issuer から bounded sample を集めて明確な recurrence を示せるか
+- JWT auth surface に issue-then-exploit probe を打てるか
+
+Phase03 は **classification suite** であり、padding oracle や timing leak のような
+高回数・高リスクの active validation は含めない。
+
+## 5.10 後続フェーズ
+
+Phase03 の後に、以下を別 suite として追加する：
+
+1. **Phase4 Active Validation Suite**
    - Padding Oracle
    - Timing leak
 
-この順序にすることで、まず「URL を入れれば edge posture は安定して測れる」ことと、「base URL を入れれば app-layer の relevant surface を安定抽出できる」ことを benchmark として成立させた上で、より難しい app/runtime 系に進める。
+この順序にすることで、まず「URL を入れれば edge posture は安定して測れる」こと、
+「base URL を入れれば relevant surface を安定抽出できる」こと、
+「bounded probe で主要 misuses を安定分類できる」ことを benchmark として成立させた上で、
+より難しい runtime 系に進める。
 
-## 5.10 仕様書
+## 5.11 仕様書
 
-Phase01 / Phase02 の完全設計は以下の artifact 群で構成する。
+Phase01 / Phase02 / Phase03 の完全設計は以下の artifact 群で構成する。
 
 - [benchmarks/phase01-spec.md](../benchmarks/phase01-spec.md)
   suite boundary、input contract、normalization、evidence contract
@@ -341,5 +367,11 @@ Phase01 / Phase02 の完全設計は以下の artifact 群で構成する。
   discovery precision/recall、negative control suppression、TTFR、duplicate policy
 - [benchmarks/phase02-report.schema.json](../benchmarks/phase02-report.schema.json)
   実装が出力すべき discovery report schema
+- [benchmarks/phase03-spec.md](../benchmarks/phase03-spec.md)
+  classification boundary、probe semantics、evidence contract
+- [benchmarks/phase03-scoring-spec.md](../benchmarks/phase03-scoring-spec.md)
+  classification precision/recall、negative control suppression、TTFC、duplicate policy
+- [benchmarks/phase03-report.schema.json](../benchmarks/phase03-report.schema.json)
+  実装が出力すべき classification report schema
 - [benchmarks/ground_truth.yaml](../benchmarks/ground_truth.yaml)
   target-specific ground truth と machine-readable contract

@@ -341,9 +341,17 @@ def auth_jwt_rsa_confusion():
 
         # VULNERABILITY: Uses the public key as HMAC secret when alg=HS256
         if alg == "HS256":
-            payload = pyjwt.decode(
-                token, RSA_PUBLIC_PEM, algorithms=["HS256"]
+            signing_input, signature_b64 = token.rsplit(".", 1)
+            provided_signature = base64.urlsafe_b64decode(
+                signature_b64 + "=" * (-len(signature_b64) % 4)
             )
+            expected_signature = hmac.new(
+                RSA_PUBLIC_PEM, signing_input.encode(), hashlib.sha256
+            ).digest()
+            if not hmac.compare_digest(provided_signature, expected_signature):
+                raise ValueError("Invalid HS256 signature")
+            payload_b64 = parts[1] + "=" * (4 - len(parts[1]) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(payload_b64))
         else:
             payload = pyjwt.decode(
                 token, RSA_PUBLIC_KEY, algorithms=["RS256"]

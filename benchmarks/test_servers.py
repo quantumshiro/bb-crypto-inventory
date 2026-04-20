@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import socket
@@ -223,6 +224,42 @@ class TestBm07JwtAlgNone:
         data = resp.json()
         assert data.get("authenticated") is True, "alg=none JWT should be accepted"
         assert data.get("user", {}).get("role") == "admin"
+
+
+@skipif_no_server
+class TestBm08JwtRs256ToHs256:
+    """BM-08: JWT verification should accept HS256 signed with the public key."""
+
+    def test_rs256_to_hs256_accepted(self) -> None:
+        issue_resp = httpx.post(f"{BASE_URL}/api/auth-rsa")
+        assert issue_resp.status_code == 200
+        issue_data = issue_resp.json()
+        token = issue_data["token"]
+        public_key = issue_data["public_key"].encode()
+
+        header_b64, payload_b64, _ = token.split(".")
+        header = json.loads(base64.urlsafe_b64decode(header_b64 + "=" * (-len(header_b64) % 4)))
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64 + "=" * (-len(payload_b64) % 4)))
+        assert header["alg"] == "RS256"
+
+        forged_header = base64.urlsafe_b64encode(
+            json.dumps({"alg": "HS256", "typ": "JWT"}).encode()
+        ).rstrip(b"=").decode()
+        forged_payload = base64.urlsafe_b64encode(
+            json.dumps(payload).encode()
+        ).rstrip(b"=").decode()
+        signing_input = f"{forged_header}.{forged_payload}"
+        signature = hmac.new(public_key, signing_input.encode(), hashlib.sha256).digest()
+        forged_signature = base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
+        forged_token = f"{signing_input}.{forged_signature}"
+
+        resp = httpx.post(
+            f"{BASE_URL}/api/auth-rsa",
+            headers={"Authorization": f"Bearer {forged_token}"},
+        )
+        data = resp.json()
+        assert data.get("authenticated") is True, "RS256→HS256 JWT should be accepted"
+        assert data.get("user", {}).get("role") == "user"
 
 
 @skipif_no_server
