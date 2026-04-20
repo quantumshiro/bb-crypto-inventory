@@ -2,7 +2,7 @@
 
 ## 5.1 基本方針
 
-最終的には Phase 0-3 を含む包括的なブラックボックス暗号インベントリベンチマークを目指すが、**最初に固定すべきなのは Phase 0+1 の URL-scoped benchmark** である。
+最終的には Phase 0-3 を含む包括的なブラックボックス暗号インベントリベンチマークを目指すが、**最初に固定すべきなのは Phase 0+1 の URL-scoped benchmark と、続く Phase 2 の discovery benchmark** である。
 
 理由は次の通り：
 
@@ -20,7 +20,7 @@
 | 段階 | スコープ | 目的 |
 |------|---------|------|
 | **Phase01 MVP** | Recon + Protocol Layer | まず安定した基準スイートを作る |
-| Phase2 Suite | App-layer crypto misuse | 露出した暗号 API の検出力を測る |
+| **Phase02 MVP** | App surface discovery | 暗号関連 endpoint を見つけて分類できるかを測る |
 | Phase3 Suite | Oracle / Timing | 許諾環境向けの深い動的検査を測る |
 
 ## 5.2 Phase01 MVP の評価境界
@@ -223,7 +223,84 @@ Phase01 を「固まった」とみなす条件は、少なくとも以下とす
 - runtime の分散
 - TLS grade の一貫性
 
-## 5.7 比較ベースライン
+## 5.7 Phase02 Discovery Suite
+
+Phase02 は **base-URL-scoped discovery benchmark** とする。
+
+- 入力は `http://service.example.com/` のような **明示的な base URL**
+- scoring 対象は same-origin の service index / OpenAPI から取れる candidate endpoint
+- app-layer misuse の判定そのものはまだ採点しない
+
+### Phase02 で要求する capability
+
+- service index fetch
+- OpenAPI descriptor fetch
+- candidate endpoint extraction
+- endpoint path / method normalization
+- crypto-relevant surface classification
+
+descriptor に `surface_kind` / `crypto_relevant` や OpenAPI vendor extension
+`x-bbci-surface-kind` / `x-bbci-crypto-relevant` が存在する場合は、それを
+heuristic より優先する。
+
+### Phase02 で採点する surface kind
+
+| Surface Kind | 例 |
+|-------------|----|
+| `encryption_oracle` | `/api/encrypt`, `/api/encrypt-cbc-static`, `/api/encrypt-strong` |
+| `hash_oracle` | `/api/hash`, `/api/hash-sha1`, `/api/hash-strong` |
+| `token_issuer` | `/api/token`, `/api/token-secure` |
+| `decryption_oracle` | `/api/decrypt` |
+| `jwt_auth_surface` | `/api/auth`, `/api/auth-rsa` |
+| `hmac_verifier` | `/api/verify-hmac`, `/api/verify-hmac-secure` |
+
+### Phase02 ポジティブターゲット
+
+Phase02 では later phase の脆弱/安全 endpoint の両方を **relevant surface** として採点する。
+検出対象は vulnerability ではなく、「後続検査に回すべき surface を見つけられたか」である。
+
+| ID | Endpoint | 期待 surface kind |
+|----|----------|-------------------|
+| D-01 | `/api/encrypt` | `encryption_oracle` |
+| D-02 | `/api/encrypt-cbc-static` | `encryption_oracle` |
+| D-03 | `/api/encrypt-strong` | `encryption_oracle` |
+| D-04 | `/api/hash` | `hash_oracle` |
+| D-05 | `/api/hash-sha1` | `hash_oracle` |
+| D-06 | `/api/hash-strong` | `hash_oracle` |
+| D-07 | `/api/token` | `token_issuer` |
+| D-08 | `/api/token-secure` | `token_issuer` |
+| D-09 | `/api/decrypt` | `decryption_oracle` |
+| D-10 | `/api/auth` | `jwt_auth_surface` |
+| D-11 | `/api/auth-rsa` | `jwt_auth_surface` |
+| D-12 | `/api/verify-hmac` | `hmac_verifier` |
+| D-13 | `/api/verify-hmac-secure` | `hmac_verifier` |
+
+### Phase02 ネガティブコントロール
+
+| ID | Endpoint | 期待結果 |
+|----|----------|---------|
+| D-NC-01 | `/health` | crypto-relevant として報告しない |
+| D-NC-02 | `/api/ping` | crypto-relevant として報告しない |
+| D-NC-03 | `/api/profile` | crypto-relevant として報告しない |
+
+### Phase02 スコアリング
+
+主要指標は次の通り：
+
+- relevant endpoint recall
+- discovery precision
+- F1 Score
+- budget compliance
+- mean time to first relevant discovery
+
+### Phase02 request budget
+
+| 種類 | 推奨上限 |
+|------|---------|
+| Descriptor fetch | 4 req |
+| 合計 | 6 actions / base URL 程度 |
+
+## 5.8 比較ベースライン
 
 | ベースライン | スコープ | 種別 |
 |------------|---------|------|
@@ -232,25 +309,25 @@ Phase01 を「固まった」とみなす条件は、少なくとも以下とす
 | Header-only baseline | Phase 0 Recon only | 決定論的ヒューリスティック |
 | CryptoScope LLM | 静的解析（whitebox） | LLM ベース |
 
-## 5.8 後続フェーズ
+## 5.9 後続フェーズ
 
-Phase01 MVP を固定した後、以下を別 suite として追加する：
+Phase01 / Phase02 を固定した後、以下を別 suite として追加する：
 
-1. **Phase2 Suite**
+1. **Phase3 Classification Suite**
    - ECB
    - Static IV
    - WeakHash
    - JWT confusion
    - InsecureRandom
-2. **Phase3 Suite**
+2. **Phase4 Active Validation Suite**
    - Padding Oracle
    - Timing leak
 
-この順序にすることで、まず「URL を入れれば edge posture は安定して測れる」という benchmark を成立させた上で、より難しい app/runtime 系に進める。
+この順序にすることで、まず「URL を入れれば edge posture は安定して測れる」ことと、「base URL を入れれば app-layer の relevant surface を安定抽出できる」ことを benchmark として成立させた上で、より難しい app/runtime 系に進める。
 
-## 5.9 仕様書
+## 5.10 仕様書
 
-Phase01 の完全設計は以下の 4 つで構成する。
+Phase01 / Phase02 の完全設計は以下の artifact 群で構成する。
 
 - [benchmarks/phase01-spec.md](../benchmarks/phase01-spec.md)
   suite boundary、input contract、normalization、evidence contract
@@ -258,5 +335,11 @@ Phase01 の完全設計は以下の 4 つで構成する。
   TP/FP/FN/INCONCLUSIVE、grade accuracy、duplicate policy、release gate
 - [benchmarks/phase01-report.schema.json](../benchmarks/phase01-report.schema.json)
   実装が出力すべき report schema
+- [benchmarks/phase02-spec.md](../benchmarks/phase02-spec.md)
+  discovery boundary、descriptor policy、surface taxonomy、evidence contract
+- [benchmarks/phase02-scoring-spec.md](../benchmarks/phase02-scoring-spec.md)
+  discovery precision/recall、negative control suppression、TTFR、duplicate policy
+- [benchmarks/phase02-report.schema.json](../benchmarks/phase02-report.schema.json)
+  実装が出力すべき discovery report schema
 - [benchmarks/ground_truth.yaml](../benchmarks/ground_truth.yaml)
   target-specific ground truth と machine-readable contract

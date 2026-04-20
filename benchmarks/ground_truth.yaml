@@ -84,6 +84,69 @@ benchmark_suites:
     negative_control_ids:
       - NC-04
     recommended_base_url: "http://localhost:9000"
+  phase02:
+    name: "Phase 2 Discovery MVP"
+    description: >
+      Base-URL-scoped discovery benchmark for app-layer cryptography-relevant
+      HTTP surfaces. The input is an authorized application base URL, not an
+      individual endpoint. Scoring covers same-origin descriptor fetching,
+      candidate extraction, and classification of crypto-relevant endpoints
+      such as encryption, hashing, token issuance, JWT auth, and HMAC
+      verification surfaces. It does NOT score vulnerability classification or
+      active cryptographic probing.
+    phases: [0, 2]
+    evaluation_mode: "base_url_discovery"
+    assumptions:
+      - "User supplies the explicit base URL of their own service."
+      - "Discovery stays on the same origin as the supplied base URL."
+      - "Service index and/or OpenAPI-like descriptors are acceptable discovery sources."
+      - "The suite models authorized self-assessment of an application surface."
+    non_goals:
+      - "TLS posture assessment"
+      - "vulnerability classification"
+      - "oracle / timing / randomness testing"
+      - "adjacent-port neighborhood discovery"
+    request_budget:
+      descriptor_fetch_max: 4
+      total_actions_recommended_max: 6
+    required_capabilities:
+      - "fetch_service_index"
+      - "fetch_openapi_descriptor"
+      - "extract_candidate_endpoints"
+      - "classify_crypto_relevant_surfaces"
+    optional_capabilities:
+      - "crawl_html_docs"
+      - "follow_same_origin_redirects"
+    release_gate:
+      precision_min: 0.95
+      recall_min: 0.95
+      negative_control_false_positives_allowed: 0
+      repeated_runs_min: 10
+      mean_time_to_first_relevant_seconds_max: 2.0
+    score_weights:
+      relevant_endpoint_recall: 0.55
+      discovery_precision: 0.25
+      negative_control_suppression: 0.10
+      request_budget: 0.10
+    target_ids:
+      - D-01
+      - D-02
+      - D-03
+      - D-04
+      - D-05
+      - D-06
+      - D-07
+      - D-08
+      - D-09
+      - D-10
+      - D-11
+      - D-12
+      - D-13
+    negative_control_ids:
+      - D-NC-01
+      - D-NC-02
+      - D-NC-03
+    recommended_base_url: "http://localhost:9000"
 
 phase01_contract:
   spec_version: "1.0"
@@ -189,6 +252,193 @@ phase01_contract:
     - "duplicate_false_positive"
     - "true_negative"
     - "inconclusive"
+
+phase02_contract:
+  spec_version: "1.0"
+  spec_paths:
+    suite_spec: "benchmarks/phase02-spec.md"
+    scoring_spec: "benchmarks/phase02-scoring-spec.md"
+    report_schema: "benchmarks/phase02-report.schema.json"
+  surface_kinds:
+    - "encryption_oracle"
+    - "hash_oracle"
+    - "token_issuer"
+    - "decryption_oracle"
+    - "jwt_auth_surface"
+    - "hmac_verifier"
+  input_contract:
+    allowed_schemes: ["http", "https"]
+    canonicalization:
+      lowercase_scheme_host: true
+      default_http_port: 80
+      default_https_port: 443
+      normalize_empty_path_to_slash: true
+      strip_query_for_target_identity: true
+      strip_fragment: true
+    redirect_policy:
+      same_origin_max_hops: 1
+      cross_origin_result: "inconclusive"
+    discovery_sources:
+      - "service_index"
+      - "openapi"
+    explicit_descriptor_fields:
+      - "surface_kind"
+      - "crypto_relevant"
+      - "x-bbci-surface-kind"
+      - "x-bbci-crypto-relevant"
+    descriptor_paths:
+      - "/"
+      - "/openapi.json"
+      - "/swagger.json"
+  request_accounting:
+    action_types:
+      - "descriptor_fetch"
+      - "retry"
+      - "redirect_follow"
+    retry_policy:
+      max_retries_per_action: 1
+      count_retries_as_actions: true
+  normalization:
+    method_normalization: "uppercase"
+    same_origin_required: true
+    dedupe_key:
+      - "endpoint_url"
+      - "surface_kind"
+  evidence_contract:
+    common_required_keys:
+      - "observation_ids"
+      - "base_url"
+      - "collected_via"
+      - "captured_at"
+    discovery_required_keys:
+      - "sources"
+      - "endpoint_url"
+      - "endpoint_path"
+      - "methods"
+      - "surface_kind"
+      - "same_origin"
+      - "classification_basis"
+      - "source_urls"
+  verdict_statuses:
+    - "matched"
+    - "missed"
+    - "false_positive"
+    - "duplicate_false_positive"
+    - "true_negative"
+    - "inconclusive"
+
+phase02_targets:
+  D-01:
+    name: "ECB encryption surface"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/encrypt"
+    methods: ["POST"]
+    surface_kind: "encryption_oracle"
+    mapped_benchmark: "BM-01"
+  D-02:
+    name: "Static-IV encryption surface"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/encrypt-cbc-static"
+    methods: ["POST"]
+    surface_kind: "encryption_oracle"
+    mapped_benchmark: "BM-02"
+  D-03:
+    name: "Strong encryption surface"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/encrypt-strong"
+    methods: ["POST"]
+    surface_kind: "encryption_oracle"
+    mapped_benchmark: "NC-01"
+  D-04:
+    name: "MD5 hashing surface"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/hash"
+    methods: ["POST"]
+    surface_kind: "hash_oracle"
+    mapped_benchmark: "BM-03"
+  D-05:
+    name: "SHA-1 hashing surface"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/hash-sha1"
+    methods: ["POST"]
+    surface_kind: "hash_oracle"
+    mapped_benchmark: "BM-04"
+  D-06:
+    name: "Strong hashing surface"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/hash-strong"
+    methods: ["POST"]
+    surface_kind: "hash_oracle"
+    mapped_benchmark: "NC-02"
+  D-07:
+    name: "Predictable token surface"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/token"
+    methods: ["GET"]
+    surface_kind: "token_issuer"
+    mapped_benchmark: "BM-05"
+  D-08:
+    name: "Secure token surface"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/token-secure"
+    methods: ["GET"]
+    surface_kind: "token_issuer"
+    mapped_benchmark: "NC-03"
+  D-09:
+    name: "CBC decryption surface"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/decrypt"
+    methods: ["POST"]
+    surface_kind: "decryption_oracle"
+    mapped_benchmark: "BM-06"
+  D-10:
+    name: "JWT auth surface"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/auth"
+    methods: ["POST"]
+    surface_kind: "jwt_auth_surface"
+    mapped_benchmark: "BM-07"
+  D-11:
+    name: "JWT RSA auth surface"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/auth-rsa"
+    methods: ["POST"]
+    surface_kind: "jwt_auth_surface"
+    mapped_benchmark: "BM-08"
+  D-12:
+    name: "Timing-sensitive HMAC verifier surface"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/verify-hmac"
+    methods: ["POST"]
+    surface_kind: "hmac_verifier"
+    mapped_benchmark: "BM-10"
+  D-13:
+    name: "Constant-time HMAC verifier surface"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/verify-hmac-secure"
+    methods: ["POST"]
+    surface_kind: "hmac_verifier"
+    mapped_benchmark: "NC-03"
+
+phase02_negative_controls:
+  D-NC-01:
+    name: "Health endpoint is not crypto-relevant"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/health"
+    methods: ["GET"]
+    surface_kind: "non_crypto"
+  D-NC-02:
+    name: "Ping endpoint is not crypto-relevant"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/ping"
+    methods: ["GET"]
+    surface_kind: "non_crypto"
+  D-NC-03:
+    name: "Profile endpoint is not crypto-relevant"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/profile"
+    methods: ["GET"]
+    surface_kind: "non_crypto"
 
 # ============================================================
 # Misuse category mapping to standards

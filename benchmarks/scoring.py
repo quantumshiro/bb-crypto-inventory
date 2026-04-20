@@ -27,6 +27,7 @@ from bbci.phase01 import (
     normalize_protocol,
     normalize_signature_algorithm,
 )
+from bbci.phase02 import canonicalize_endpoint_url, normalize_methods
 
 
 @dataclass
@@ -60,6 +61,7 @@ class BenchmarkScore:
     negative_control_results: list[dict] = field(default_factory=list)
     benchmark_verdicts: list[dict[str, Any]] = field(default_factory=list)
     phase01_reports: list[dict[str, Any]] = field(default_factory=list)
+    phase02_reports: list[dict[str, Any]] = field(default_factory=list)
 
     per_benchmark: dict[str, dict[str, Any]] = field(default_factory=dict)
     per_channel: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -68,6 +70,7 @@ class BenchmarkScore:
     ssl_grade_accuracy: float = 0.0
     budget_compliance_rate: float = 0.0
     inconclusive_rate: float = 0.0
+    mean_time_to_first_relevant_seconds: float = 0.0
 
     @property
     def precision(self) -> float:
@@ -107,6 +110,9 @@ class BenchmarkScore:
             "ssl_grade_accuracy": round(self.ssl_grade_accuracy, 4),
             "budget_compliance_rate": round(self.budget_compliance_rate, 4),
             "inconclusive_rate": round(self.inconclusive_rate, 4),
+            "mean_time_to_first_relevant_seconds": round(
+                self.mean_time_to_first_relevant_seconds, 4
+            ),
             "per_benchmark": self.per_benchmark,
             "per_channel": self.per_channel,
             "confidence_calibration": self.confidence_calibration,
@@ -219,6 +225,231 @@ def _phase01_grade_from_report(report: dict[str, Any]) -> str | None:
             data = observation.get("data", {})
             return data.get("grade")
     return None
+
+
+def _phase02_discovery_evidence_valid(discovery: dict[str, Any], contract: dict[str, Any]) -> bool:
+    evidence = discovery.get("evidence", {})
+    if not isinstance(evidence, dict):
+        return False
+    required_keys = list(contract.get("evidence_contract", {}).get("common_required_keys", []))
+    required_keys += list(contract.get("evidence_contract", {}).get("discovery_required_keys", []))
+    for key in required_keys:
+        if key not in evidence:
+            return False
+    if evidence.get("same_origin") is not True:
+        return False
+    if evidence.get("endpoint_url") != discovery.get("endpoint_url"):
+        return False
+    if evidence.get("endpoint_path") != discovery.get("endpoint_path"):
+        return False
+    if evidence.get("surface_kind") != discovery.get("surface_kind"):
+        return False
+    if evidence.get("classification_basis") not in {"declared", "heuristic"}:
+        return False
+    source_urls = evidence.get("source_urls", [])
+    if not isinstance(source_urls, list) or not source_urls:
+        return False
+    return True
+
+
+def score_phase02_reports(
+    reports: list[dict[str, Any]],
+    ground_truth_path: str = "benchmarks/ground_truth.yaml",
+    target_ids: list[str] | None = None,
+    negative_control_ids: list[str] | None = None,
+) -> BenchmarkScore:
+    """Score phase02 base-URL discovery reports against the phase02 contract."""
+    gt = load_ground_truth(ground_truth_path)
+    contract = gt.get("phase02_contract", {})
+    suite = gt.get("benchmark_suites", {}).get("phase02", {})
+    targets = gt.get("phase02_targets", {})
+    negative_controls = gt.get("phase02_negative_controls", {})
+
+    score = BenchmarkScore()
+    score.phase02_reports = reports
+
+    selected_target_ids = target_ids or list(suite.get("target_ids", []))
+    selected_negative_control_ids = negative_control_ids or list(
+        suite.get("negative_control_ids", [])
+    )
+
+    expected_units: list[tuple[str, str, str, list[str]]] = []
+    for target_id in selected_target_ids:
+        target = targets[target_id]
+        endpoint_url = canonicalize_endpoint_url(target["target_url"], target["endpoint_path"])
+        expected_methods = normalize_methods(target.get("methods"))
+        expected_units.append((target_id, endpoint_url, target["surface_kind"], expected_methods))
+        score.per_benchmark[target_id] = {
+            "name": target["name"],
+            "expected": 1,
+            "detected": 0,
+            "findings": [],
+        }
+
+    score.total_expected = len(expected_units)
+
+    allowed_endpoint_urls = {
+        canonicalize_endpoint_url(
+            targets[target_id]["target_url"],
+            targets[target_id]["endpoint_path"],
+        )
+        for target_id in selected_target_ids
+    }
+    allowed_endpoint_urls.update(
+        canonicalize_endpoint_url(
+            negative_controls[nc_id]["target_url"], negative_controls[nc_id]["endpoint_path"]
+        )
+        for nc_id in selected_negative_control_ids
+    )
+
+    all_discoveries: list[dict[str, Any]] = []
+    for report in reports:
+        for discovery in report.get("discoveries", []):
+            if discovery.get("endpoint_url") in allowed_endpoint_urls:
+                all_discoveries.append(discovery)
+    score.total_detected = len(all_discoveries)
+
+    matched_ids: set[str] = set()
+    duplicate_ids: set[str] = set()
+    mean_ttf_values: list[float] = []
+    inconclusive_reports = 0
+    budget_reports = 0
+    budget_compliant_reports = 0
+
+    for target_id, endpoint_url, surface_kind, expected_methods in expected_units:
+        candidates = []
+        for discovery in all_discoveries:
+            if discovery.get("id") in matched_ids:
+                continue
+            if discovery.get("endpoint_url") != endpoint_url:
+                continue
+            if discovery.get("surface_kind") != surface_kind:
+                continue
+            observed_methods = normalize_methods(discovery.get("methods", []))
+            if expected_methods and not set(observed_methods).intersection(expected_methods):
+                continue
+            if not _phase02_discovery_evidence_valid(discovery, contract):
+                continue
+            candidates.append(discovery)
+
+        candidates.sort(
+            key=lambda discovery: (
+                -float(discovery.get("confidence", 0.0)),
+                discovery.get("id", ""),
+            )
+        )
+
+        if candidates:
+            chosen = candidates[0]
+            matched_ids.add(chosen["id"])
+            for duplicate in candidates[1:]:
+                duplicate_ids.add(duplicate["id"])
+            score.true_positives += 1
+            score.per_benchmark[target_id]["detected"] += 1
+            score.confidence_calibration.append(
+                {
+                    "benchmark": target_id,
+                    "expected_min": 0.8,
+                    "actual": chosen.get("confidence", 0.0),
+                    "meets_threshold": chosen.get("confidence", 0.0) >= 0.8,
+                }
+            )
+            score.benchmark_verdicts.append(
+                {
+                    "benchmark_id": target_id,
+                    "endpoint_url": endpoint_url,
+                    "status": "matched",
+                    "surface_kind": surface_kind,
+                }
+            )
+            score.matches.append(
+                MatchResult(
+                    benchmark_id=target_id,
+                    expected_category="DiscoverySurface",
+                    expected_algorithm=surface_kind,
+                    matched=True,
+                    matched_finding_id=chosen.get("id"),
+                    matched_confidence=chosen.get("confidence", 0.0),
+                    expected_min_confidence=0.8,
+                )
+            )
+        else:
+            score.false_negatives += 1
+            score.benchmark_verdicts.append(
+                {
+                    "benchmark_id": target_id,
+                    "endpoint_url": endpoint_url,
+                    "status": "missed",
+                    "surface_kind": surface_kind,
+                }
+            )
+            score.matches.append(
+                MatchResult(
+                    benchmark_id=target_id,
+                    expected_category="DiscoverySurface",
+                    expected_algorithm=surface_kind,
+                    matched=False,
+                    expected_min_confidence=0.8,
+                    notes="Not discovered",
+                )
+            )
+
+    for discovery in all_discoveries:
+        discovery_id = discovery.get("id", "")
+        if discovery_id in matched_ids:
+            continue
+        score.false_positives += 1
+        if discovery_id in duplicate_ids:
+            score.duplicate_false_positives += 1
+        score.false_positive_findings.append(discovery)
+
+    score.per_channel["PHASE02:SURFACE_DISCOVERY"] = {
+        "expected": score.total_expected,
+        "detected": score.true_positives,
+    }
+
+    for report in reports:
+        request_accounting = report.get("request_accounting", {})
+        if request_accounting:
+            budget_reports += 1
+            if request_accounting.get("budget_compliant"):
+                budget_compliant_reports += 1
+        if any(
+            verdict.get("status") == "inconclusive"
+            for verdict in report.get("benchmark_verdicts", [])
+        ):
+            inconclusive_reports += 1
+        ttf = report.get("summary", {}).get("time_to_first_relevant_seconds")
+        if isinstance(ttf, (int, float)):
+            mean_ttf_values.append(float(ttf))
+
+    score.budget_compliance_rate = (
+        budget_compliant_reports / budget_reports if budget_reports else 0.0
+    )
+    score.inconclusive_rate = inconclusive_reports / len(reports) if reports else 0.0
+    score.mean_time_to_first_relevant_seconds = (
+        sum(mean_ttf_values) / len(mean_ttf_values) if mean_ttf_values else 0.0
+    )
+
+    for nc_id in selected_negative_control_ids:
+        nc_def = negative_controls[nc_id]
+        endpoint_url = canonicalize_endpoint_url(nc_def["target_url"], nc_def["endpoint_path"])
+        discovered = any(
+            discovery.get("endpoint_url") == endpoint_url for discovery in all_discoveries
+        )
+        passed = not discovered
+        score.negative_control_results.append(
+            {
+                "id": nc_id,
+                "name": nc_def["name"],
+                "passed": passed,
+                "endpoint_url": endpoint_url,
+            }
+        )
+        if passed:
+            score.true_negatives += 1
+
+    return score
 
 
 def score_phase01_reports(
