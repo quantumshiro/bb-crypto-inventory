@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bbci.local/schemas/phase02-report.schema.json",
+  "title": "BBCI Phase02 Discovery Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "suite_id",
+    "scanner",
+    "execution",
+    "request_accounting",
+    "observations",
+    "discoveries",
+    "benchmark_verdicts",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase02-report/v1"
+    },
+    "suite_id": {
+      "const": "phase02"
+    },
+    "scanner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_url",
+        "canonical_base_url",
+        "evaluation_mode",
+        "started_at",
+        "finished_at"
+      ],
+      "properties": {
+        "base_url": { "type": "string", "format": "uri" },
+        "canonical_base_url": { "type": "string", "format": "uri" },
+        "evaluation_mode": { "const": "base_url_discovery" },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": "string" }
+      }
+    },
+    "request_accounting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total_actions",
+        "descriptor_fetches",
+        "redirect_hops_followed",
+        "budget_compliant"
+      ],
+      "properties": {
+        "total_actions": { "type": "integer", "minimum": 0 },
+        "descriptor_fetches": { "type": "integer", "minimum": 0 },
+        "redirect_hops_followed": { "type": "integer", "minimum": 0 },
+        "budget_compliant": { "type": "boolean" }
+      }
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "target_url", "captured_at", "data"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string" },
+          "target_url": { "type": "string", "format": "uri" },
+          "captured_at": { "type": "string" },
+          "data": { "type": "object" }
+        }
+      }
+    },
+    "discoveries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "endpoint_url",
+          "endpoint_path",
+          "methods",
+          "surface_kind",
+          "confidence",
+          "evidence"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "endpoint_url": { "type": "string", "format": "uri" },
+          "endpoint_path": { "type": "string" },
+          "methods": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "surface_kind": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+          "evidence": { "type": "object" }
+        }
+      }
+    },
+    "benchmark_verdicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["benchmark_id", "endpoint_url", "status"],
+        "properties": {
+          "benchmark_id": { "type": "string" },
+          "endpoint_url": { "type": "string", "format": "uri" },
+          "status": { "type": "string" }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_count",
+        "candidate_count_before_filter",
+        "non_crypto_candidate_count",
+        "relevant_discovery_count",
+        "descriptor_attempts",
+        "successful_descriptor_fetches",
+        "failed_descriptor_fetches",
+        "descriptor_sources",
+        "time_to_first_relevant_seconds"
+      ],
+      "properties": {
+        "candidate_count": { "type": "integer", "minimum": 0 },
+        "candidate_count_before_filter": { "type": "integer", "minimum": 0 },
+        "non_crypto_candidate_count": { "type": "integer", "minimum": 0 },
+        "relevant_discovery_count": { "type": "integer", "minimum": 0 },
+        "descriptor_attempts": { "type": "integer", "minimum": 0 },
+        "successful_descriptor_fetches": { "type": "integer", "minimum": 0 },
+        "failed_descriptor_fetches": { "type": "integer", "minimum": 0 },
+        "descriptor_sources": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "matched_discovery_count": { "type": "integer", "minimum": 0 },
+        "false_positive_discovery_count": { "type": "integer", "minimum": 0 },
+        "missed_expected_count": { "type": "integer", "minimum": 0 },
+        "time_to_first_relevant_seconds": {
+          "type": ["number", "null"],
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

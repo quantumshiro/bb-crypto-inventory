@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bbci.local/schemas/phase03-report.schema.json",
+  "title": "BBCI Phase03 Classification Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "suite_id",
+    "scanner",
+    "execution",
+    "request_accounting",
+    "observations",
+    "classifications",
+    "benchmark_verdicts",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "phase03-report/v1"
+    },
+    "suite_id": {
+      "const": "phase03"
+    },
+    "scanner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_url",
+        "canonical_base_url",
+        "evaluation_mode",
+        "started_at",
+        "finished_at"
+      ],
+      "properties": {
+        "base_url": { "type": "string", "format": "uri" },
+        "canonical_base_url": { "type": "string", "format": "uri" },
+        "evaluation_mode": { "const": "base_url_classification" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "finished_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "request_accounting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total_actions",
+        "discovery_actions",
+        "probe_actions",
+        "token_fetches",
+        "redirect_hops_followed",
+        "budget_compliant"
+      ],
+      "properties": {
+        "total_actions": { "type": "integer", "minimum": 0 },
+        "discovery_actions": { "type": "integer", "minimum": 0 },
+        "probe_actions": { "type": "integer", "minimum": 0 },
+        "token_fetches": { "type": "integer", "minimum": 0 },
+        "redirect_hops_followed": { "type": "integer", "minimum": 0 },
+        "budget_compliant": { "type": "boolean" }
+      }
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "target_url", "captured_at", "data"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string" },
+          "target_url": { "type": "string", "format": "uri" },
+          "captured_at": { "type": "string", "format": "date-time" },
+          "data": { "type": "object" }
+        }
+      }
+    },
+    "classifications": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "endpoint_url",
+          "endpoint_path",
+          "methods",
+          "surface_kind",
+          "category",
+          "severity",
+          "algorithm",
+          "confidence",
+          "detection_channel",
+          "evidence"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "endpoint_url": { "type": "string", "format": "uri" },
+          "endpoint_path": { "type": "string" },
+          "methods": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "surface_kind": { "type": "string" },
+          "category": { "type": "string" },
+          "severity": { "type": "string" },
+          "algorithm": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+          "detection_channel": { "type": "string" },
+          "evidence": { "type": "object" }
+        }
+      }
+    },
+    "benchmark_verdicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["benchmark_id", "endpoint_url", "status"],
+        "properties": {
+          "benchmark_id": { "type": "string" },
+          "endpoint_url": { "type": "string", "format": "uri" },
+          "status": { "type": "string" }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_count",
+        "in_scope_candidate_count",
+        "out_of_scope_candidate_count",
+        "classification_count",
+        "skipped_surface_count",
+        "inconclusive_count",
+        "time_to_first_classification_seconds"
+      ],
+      "properties": {
+        "candidate_count": { "type": "integer", "minimum": 0 },
+        "in_scope_candidate_count": { "type": "integer", "minimum": 0 },
+        "out_of_scope_candidate_count": { "type": "integer", "minimum": 0 },
+        "classification_count": { "type": "integer", "minimum": 0 },
+        "skipped_surface_count": { "type": "integer", "minimum": 0 },
+        "inconclusive_count": { "type": "integer", "minimum": 0 },
+        "matched_classification_count": { "type": "integer", "minimum": 0 },
+        "false_positive_classification_count": { "type": "integer", "minimum": 0 },
+        "missed_expected_count": { "type": "integer", "minimum": 0 },
+        "time_to_first_classification_seconds": {
+          "type": ["number", "null"],
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

@@ -2,14 +2,23 @@
 
 Blackbox cryptographic benchmark suite for evaluating `bbci` detection capabilities.
 
-The first stabilized suite is `phase01`: a URL-scoped benchmark for Recon (Phase 0)
-and Protocol Layer testing (Phase 1).
+The first stabilized suites are:
+
+- `phase01`: a URL-scoped benchmark for Recon (Phase 0) and Protocol Layer testing (Phase 1)
+- `phase02`: a base-URL-scoped benchmark for application-surface discovery (Phase 2)
+- `phase03`: a base-URL-scoped benchmark for deterministic misuse classification on discovered application surfaces
 
 The normative design artifacts are:
 
 - [phase01-spec.md](./phase01-spec.md)
 - [phase01-scoring-spec.md](./phase01-scoring-spec.md)
 - [phase01-report.schema.json](./phase01-report.schema.json)
+- [phase02-spec.md](./phase02-spec.md)
+- [phase02-scoring-spec.md](./phase02-scoring-spec.md)
+- [phase02-report.schema.json](./phase02-report.schema.json)
+- [phase03-spec.md](./phase03-spec.md)
+- [phase03-scoring-spec.md](./phase03-scoring-spec.md)
+- [phase03-report.schema.json](./phase03-report.schema.json)
 - [ground_truth.yaml](./ground_truth.yaml)
 
 ## Standards Alignment
@@ -90,16 +99,87 @@ Following CamBench/CryptoAPI-Bench evaluation practice:
 | Header-only baseline | Phase 0 Recon only | Deterministic heuristic |
 | CryptoScope LLM | Static (whitebox) | LLM-based |
 
+## Phase 2 Discovery Suite
+
+`phase02` starts from a supplied application base URL and scores whether the
+scanner can discover the crypto-relevant HTTP surfaces needed by later suites.
+
+- **Evaluation mode**: base-URL-scoped same-origin discovery
+- **What it scores**: service-index/OpenAPI fetch, candidate extraction,
+  endpoint normalization, and crypto-surface classification
+- **What it does not score yet**: vulnerability classification, active probing,
+  or timing/randomness analysis
+- **Classification rule**: explicit descriptor metadata such as `surface_kind`
+  or `x-bbci-surface-kind` takes precedence over heuristic inference
+
+### Positive Targets
+
+| ID | Endpoint | Surface Kind |
+|----|----------|--------------|
+| D-01 | `/api/encrypt` | `encryption_oracle` |
+| D-02 | `/api/encrypt-cbc-static` | `encryption_oracle` |
+| D-03 | `/api/encrypt-strong` | `encryption_oracle` |
+| D-04 | `/api/hash` | `hash_oracle` |
+| D-05 | `/api/hash-sha1` | `hash_oracle` |
+| D-06 | `/api/hash-strong` | `hash_oracle` |
+| D-07 | `/api/token` | `token_issuer` |
+| D-08 | `/api/token-secure` | `token_issuer` |
+| D-09 | `/api/decrypt` | `decryption_oracle` |
+| D-10 | `/api/auth` | `jwt_auth_surface` |
+| D-11 | `/api/auth-rsa` | `jwt_auth_surface` |
+| D-12 | `/api/verify-hmac` | `hmac_verifier` |
+| D-13 | `/api/verify-hmac-secure` | `hmac_verifier` |
+
+### Negative Controls
+
+| ID | Endpoint | Expected Result |
+|----|----------|-----------------|
+| D-NC-01 | `/health` | Must not be reported as crypto-relevant |
+| D-NC-02 | `/api/ping` | Must not be reported as crypto-relevant |
+| D-NC-03 | `/api/profile` | Must not be reported as crypto-relevant |
+
+## Phase 3 Classification Suite
+
+`phase03` starts from the same authorized application base URL as `phase02`,
+reuses same-origin discovery, and then deterministically probes only the
+discovered surfaces that are relevant for misuse classification.
+
+- **Evaluation mode**: base-URL-scoped discovery + bounded classification probes
+- **What it scores**: ECB, static IV, weak hash, predictable token generation,
+  and JWT algorithm-confusion classification
+- **What it does not score**: padding-oracle testing, timing-side-channel
+  testing, or network-neighborhood discovery
+- **Probe rule**: scoring requires behavioral evidence, not only endpoint names
+  or response metadata
+
+### Positive Targets
+
+| ID | Endpoint | Expected Finding |
+|----|----------|------------------|
+| C-01 | `/api/encrypt` | `ECBMode / AES-128-ECB` |
+| C-02 | `/api/encrypt-cbc-static` | `StaticIV / AES-128-CBC` |
+| C-03 | `/api/hash` | `WeakHash / MD5` |
+| C-04 | `/api/hash-sha1` | `WeakHash / SHA-1` |
+| C-05 | `/api/token` | `InsecureRandom / LCG` |
+| C-06 | `/api/auth` | `JWTAlgConfusion / JWT-none` |
+| C-07 | `/api/auth-rsa` | `JWTAlgConfusion / JWT-RS256-to-HS256` |
+
+### Negative Controls
+
+| ID | Endpoint | Expected Result |
+|----|----------|-----------------|
+| C-NC-01 | `/api/encrypt-strong` | Must not trigger phase03 findings |
+| C-NC-02 | `/api/hash-strong` | Must not trigger phase03 findings |
+| C-NC-03 | `/api/token-secure` | Must not trigger phase03 findings |
+
 ## Full-Suite Backlog
 
 Draft definitions for later suites remain in the repository, but they are not the first suite to stabilize:
 
-- CH2: ECB mode, static IV
-- CH5: MD5, SHA-1, JWT confusion
-- CH6: weak randomness
-- CH3/CH4: padding oracle, timing leak
+- Phase04 active oracle and timing validation
+- later operational robustness suites
 
-Those will become separate suites after the Phase 0+1 benchmark is dependable.
+Those later suites build on `phase03`; they do not replace it.
 
 ## Quick Start
 
@@ -115,6 +195,12 @@ pytest benchmarks/test_servers.py -v
 
 # Run the stabilized Phase 0+1 suite
 python -m benchmarks.runner --target http://localhost:9000 --suite phase01
+
+# Run the stabilized Phase 2 discovery suite
+python -m benchmarks.runner --target http://localhost:9000 --suite phase02
+
+# Run the stabilized Phase 3 classification suite
+python -m benchmarks.runner --target http://localhost:9000 --suite phase03
 
 # Run a single target from that suite
 python -m benchmarks.runner --target http://localhost:9000 --suite phase01 --benchmark BM-09
