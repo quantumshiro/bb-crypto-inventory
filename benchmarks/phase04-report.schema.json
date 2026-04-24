@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nyxfoundation.org/schemas/bbci/phase04-report.schema.json",
+  "title": "BBCI Phase04 Active Validation Report",
+  "type": "object",
+  "required": ["schema_version", "scanner", "target", "request_accounting", "observations", "validations", "summary"],
+  "properties": {
+    "schema_version": { "const": "phase04-report/v1" },
+    "scanner": { "type": "string" },
+    "target": { "type": "string" },
+    "started_at": { "type": "string" },
+    "duration_seconds": { "type": "number" },
+    "request_accounting": {
+      "type": "object",
+      "required": ["recommended_max_actions", "http_requests", "validation_probes", "budget_compliant"],
+      "properties": {
+        "recommended_max_actions": { "type": "integer" },
+        "http_requests": { "type": "integer" },
+        "validation_probes": { "type": "integer" },
+        "budget_compliant": { "type": "boolean" }
+      }
+    },
+    "observations": { "type": "array", "items": { "type": "object" } },
+    "validations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "target_id", "category", "algorithm", "confidence", "endpoint_url", "status", "evidence"],
+        "properties": {
+          "id": { "type": "string" },
+          "target_id": { "type": "string" },
+          "category": { "enum": ["PaddingOracle", "TimingLeak"] },
+          "algorithm": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "endpoint_url": { "type": "string" },
+          "status": { "const": "validated" },
+          "evidence": { "type": "object" }
+        }
+      }
+    },
+    "summary": { "type": "object" },
+    "benchmark_verdicts": { "type": "array", "items": { "type": "object" } }
+  }
+}

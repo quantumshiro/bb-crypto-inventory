@@ -64,6 +64,7 @@ class BenchmarkScore:
     phase01_reports: list[dict[str, Any]] = field(default_factory=list)
     phase02_reports: list[dict[str, Any]] = field(default_factory=list)
     phase03_reports: list[dict[str, Any]] = field(default_factory=list)
+    phase04_reports: list[dict[str, Any]] = field(default_factory=list)
 
     per_benchmark: dict[str, dict[str, Any]] = field(default_factory=dict)
     per_channel: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -984,6 +985,197 @@ def score_phase01_reports(
         if passed:
             score.true_negatives += 1
 
+    return score
+
+
+
+def _phase04_validation_evidence_valid(
+    validation: dict[str, Any], category: str, algorithm: str
+) -> bool:
+    evidence = validation.get("evidence", {})
+    if not isinstance(evidence, dict):
+        return False
+    required = {"observation_ids", "endpoint_url", "endpoint_path", "probe_type", "validated"}
+    if not required.issubset(evidence):
+        return False
+    if evidence.get("validated") is not True:
+        return False
+    if category == "PaddingOracle":
+        return (
+            evidence.get("probe_type") == "padding_oracle_leak"
+            and evidence.get("leak_detected") is True
+            and isinstance(evidence.get("matching_observation"), dict)
+        )
+    if category == "TimingLeak":
+        return (
+            evidence.get("probe_type") == "timing_analysis"
+            and float(evidence.get("delta_seconds", 0.0))
+            > float(evidence.get("threshold_seconds", 1.0))
+            and algorithm == "HMAC-SHA256-non-constant-time"
+        )
+    return False
+
+
+def score_phase04_reports(
+    reports: list[dict[str, Any]],
+    ground_truth_path: str = "benchmarks/ground_truth.yaml",
+    target_ids: list[str] | None = None,
+    negative_control_ids: list[str] | None = None,
+) -> BenchmarkScore:
+    """Score Phase04 active validation reports against runtime-vuln ground truth."""
+    gt = load_ground_truth(ground_truth_path)
+    suite = gt.get("benchmark_suites", {}).get("phase04", {})
+    targets = gt.get("phase04_targets", {})
+    negative_controls = gt.get("phase04_negative_controls", {})
+
+    selected_target_ids = target_ids or list(suite.get("target_ids", []))
+    selected_negative_control_ids = negative_control_ids or list(
+        suite.get("negative_control_ids", [])
+    )
+
+    score = BenchmarkScore()
+    score.phase04_reports = reports
+
+    expected_units: list[tuple[str, str, str, str, float]] = []
+    for target_id in selected_target_ids:
+        target = targets[target_id]
+        endpoint_url = canonicalize_endpoint_url(target["target_url"], target["endpoint_path"])
+        score.per_benchmark[target_id] = {
+            "name": target["name"],
+            "expected": 1,
+            "detected": 0,
+            "findings": [],
+        }
+        expected_units.append(
+            (
+                target_id,
+                endpoint_url,
+                target["category"],
+                target["algorithm"],
+                target.get("min_confidence", 0.5),
+            )
+        )
+    score.total_expected = len(expected_units)
+
+    all_validations: list[dict[str, Any]] = []
+    for report in reports:
+        all_validations.extend(report.get("validations", []))
+    score.total_detected = len(all_validations)
+
+    matched_ids: set[str] = set()
+    duplicate_ids: set[str] = set()
+    for target_id, endpoint_url, category, algorithm, min_confidence in expected_units:
+        candidates = []
+        for validation in all_validations:
+            if validation.get("id") in matched_ids:
+                continue
+            if validation.get("endpoint_url") != endpoint_url:
+                continue
+            if validation.get("category") != category:
+                continue
+            if validation.get("algorithm") != algorithm:
+                continue
+            if not _phase04_validation_evidence_valid(validation, category, algorithm):
+                continue
+            candidates.append(validation)
+
+        candidates.sort(
+            key=lambda validation: (
+                -float(validation.get("confidence", 0.0)),
+                validation.get("id", ""),
+            )
+        )
+        if candidates:
+            chosen = candidates[0]
+            matched_ids.add(chosen["id"])
+            for duplicate in candidates[1:]:
+                duplicate_ids.add(duplicate["id"])
+            score.true_positives += 1
+            score.per_benchmark[target_id]["detected"] += 1
+            score.confidence_calibration.append(
+                {
+                    "benchmark": target_id,
+                    "expected_min": min_confidence,
+                    "actual": chosen.get("confidence", 0.0),
+                    "meets_threshold": chosen.get("confidence", 0.0) >= min_confidence,
+                }
+            )
+            score.matches.append(
+                MatchResult(
+                    benchmark_id=target_id,
+                    expected_category=category,
+                    expected_algorithm=algorithm,
+                    matched=True,
+                    matched_finding_id=chosen.get("id"),
+                    matched_confidence=chosen.get("confidence", 0.0),
+                    expected_min_confidence=min_confidence,
+                )
+            )
+            score.benchmark_verdicts.append(
+                {
+                    "benchmark_id": target_id,
+                    "endpoint_url": endpoint_url,
+                    "status": "matched",
+                    "category": category,
+                }
+            )
+        else:
+            score.false_negatives += 1
+            score.matches.append(
+                MatchResult(
+                    benchmark_id=target_id,
+                    expected_category=category,
+                    expected_algorithm=algorithm,
+                    matched=False,
+                    expected_min_confidence=min_confidence,
+                    notes="Not actively validated",
+                )
+            )
+            score.benchmark_verdicts.append(
+                {
+                    "benchmark_id": target_id,
+                    "endpoint_url": endpoint_url,
+                    "status": "missed",
+                    "category": category,
+                }
+            )
+
+    for validation in all_validations:
+        validation_id = validation.get("id", "")
+        if validation_id in matched_ids:
+            continue
+        score.false_positives += 1
+        if validation_id in duplicate_ids:
+            score.duplicate_false_positives += 1
+        score.false_positive_findings.append(validation)
+
+    for target_id in selected_target_ids:
+        channel = targets[target_id].get("detection_channel", "PHASE04:ACTIVE_VALIDATION")
+        score.per_channel.setdefault(channel, {"expected": 0, "detected": 0})
+        score.per_channel[channel]["expected"] += 1
+        score.per_channel[channel]["detected"] += score.per_benchmark[target_id]["detected"]
+
+    for nc_id in selected_negative_control_ids:
+        nc_def = negative_controls[nc_id]
+        endpoint_url = canonicalize_endpoint_url(nc_def["target_url"], nc_def["endpoint_path"])
+        has_validation = any(v.get("endpoint_url") == endpoint_url for v in all_validations)
+        passed = not has_validation
+        score.negative_control_results.append(
+            {"id": nc_id, "name": nc_def["name"], "passed": passed}
+        )
+        if passed:
+            score.true_negatives += 1
+
+    budget_reports = 0
+    budget_compliant = 0
+    for report in reports:
+        request_accounting = report.get("request_accounting", {})
+        if request_accounting:
+            budget_reports += 1
+            if request_accounting.get("budget_compliant"):
+                budget_compliant += 1
+        score.benchmark_verdicts.extend(report.get("benchmark_verdicts", []))
+    score.budget_compliance_rate = budget_compliant / budget_reports if budget_reports else 0.0
     return score
 
 
