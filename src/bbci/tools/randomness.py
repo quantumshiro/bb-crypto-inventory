@@ -732,6 +732,28 @@ class RandomnessReport:
     failed_tests: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the report.
+
+        The tiered result lists are the canonical Phase 2+ schema.  Keep the
+        legacy ``tests`` mapping as a compatibility shim for existing callers
+        and tests that predate the tiered small-sample runner.
+        """
+        tests: dict[str, Any] = {}
+        for result in [*self.tier1, *self.tier2, *self.tier3]:
+            test_name = result.get("test")
+            if not test_name:
+                continue
+            tests[test_name] = result
+
+            # Backwards-compatible aliases used by the original application
+            # tool tests/API contract.
+            if test_name == "diff_analysis":
+                tests["sequential_correlation"] = result
+            elif test_name == "shr_entropy":
+                tests["frequency"] = result
+            elif test_name == "chi_square_bytes" and "frequency" not in tests:
+                tests["frequency"] = result
+
         return {
             "overall_pass": self.overall_pass,
             "overall_assessment": self.overall_assessment,
@@ -742,6 +764,7 @@ class RandomnessReport:
             "tier1_results": self.tier1,
             "tier2_results": self.tier2,
             "tier3_results": self.tier3,
+            "tests": tests,
         }
 
 

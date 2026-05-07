@@ -20,6 +20,7 @@ from bbci.models.finding import (
     Severity,
     VulnerabilityCategory,
 )
+from bbci.phase04 import ActiveValidator
 from bbci.tools.application import ApplicationTools
 from bbci.tools.common import ToolResult
 from bbci.tools.oracle import OracleTools
@@ -55,6 +56,8 @@ class AgentOrchestrator:
             slow_pace=config.scan.slow_pace,
             delay=config.scan.slow_pace_delay,
         )
+        # Use a dummy base_url for now, will be updated during scan()
+        self.validator: ActiveValidator | None = None
 
         # Findings collected during the scan
         self.findings: list[Finding] = []
@@ -63,7 +66,37 @@ class AgentOrchestrator:
 
     def _get_tools(self) -> list[dict]:
         """Get all tool definitions based on configured phases."""
-        tools: list[dict] = [REPORT_FINDING_TOOL]
+        validate_tool = {
+            "type": "function",
+            "function": {
+                "name": "validate_vulnerability",
+                "description": (
+                    "Perform active validation of a suspected cryptographic vulnerability. "
+                    "Requires a discovery object containing endpoint_url and category."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "discovery": {
+                            "type": "object",
+                            "properties": {
+                                "endpoint_url": {"type": "string"},
+                                "category": {
+                                    "type": "string",
+                                    "description": (
+                                        "Vulnerability category such as PADDING_ORACLE "
+                                        "or TIMING_LEAK"
+                                    ),
+                                },
+                            },
+                            "required": ["endpoint_url", "category"],
+                        }
+                    },
+                    "required": ["discovery"],
+                },
+            },
+        }
+        tools: list[dict] = [REPORT_FINDING_TOOL, validate_tool]
 
         phases = self.config.scan.phases
         if 0 in phases:
@@ -82,6 +115,8 @@ class AgentOrchestrator:
         # Special handling for report_finding
         if name == "report_finding":
             return self._record_finding(args)
+        if name == "validate_vulnerability":
+            return await self._run_active_validation(args)
 
         # Try each tool set
         for tool_set in [self.recon, self.tls, self.application, self.oracle]:
@@ -95,6 +130,28 @@ class AgentOrchestrator:
         return ToolResult(
             tool_name=name, success=False, error=f"Tool '{name}' not found in any phase"
         )
+
+
+    async def _run_active_validation(self, args: dict) -> dict:
+        """Execute the active validator based on the suspected vulnerability."""
+        discovery = args.get("discovery", {})
+        category = discovery.get("category", "")
+
+        if not self.validator:
+            return {"success": False, "error": "Validator not initialized"}
+
+        normalized_category = category.replace("_", "").lower()
+        if normalized_category in {"paddingoracle", "paddingoracles"}:
+            result = await self.validator.validate_padding_oracle(discovery)
+        elif normalized_category in {"timingleak", "timingsidechannel"}:
+            result = await self.validator.validate_timing_leak(discovery)
+        else:
+            return {"success": False, "error": f"No active validator for category {category}"}
+
+        if result:
+            return {"success": True, "result": result}
+        return {"success": False, "error": "Vulnerability could not be validated actively"}
+
 
     def _record_finding(self, args: dict) -> dict:
         """Record a finding from the LLM agent."""
@@ -172,6 +229,9 @@ class AgentOrchestrator:
             CBOMReport with all discovered cryptographic assets.
         """
         self._target_url = target_url
+        import httpx
+        client = httpx.AsyncClient(timeout=30)
+        self.validator = ActiveValidator(client, target_url)
         parsed = urlparse(target_url)
         host = parsed.hostname or target_url
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -192,8 +252,9 @@ class AgentOrchestrator:
                     f"Scheme: {parsed.scheme or 'https'}\n\n"
                     f"Configured phases: {self.config.scan.phases}\n"
                     f"Min confidence threshold: {self.config.scan.min_confidence}\n\n"
-                    f"Begin with Phase 0 (Reconnaissance) and proceed through all configured phases. "
-                    f"Report every cryptographic finding you discover using the report_finding tool."
+                    "Begin with Phase 0 (Reconnaissance) and proceed through all "
+                    "configured phases. Report every cryptographic finding you discover "
+                    "using the report_finding tool."
                 ),
             },
         ]

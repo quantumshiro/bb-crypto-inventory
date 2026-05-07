@@ -210,42 +210,44 @@ benchmark_suites:
   phase04:
     name: "Phase 4 Active Validation MVP"
     description: >
-      Authorized active-validation benchmark for runtime cryptographic
-      vulnerabilities that require targeted probes: padding-oracle response
-      differentials and HMAC timing leakage. This suite is deliberately
-      separate from phase03 because it sends higher-volume and more intrusive
-      probes.
-    phases: [0, 3]
-    evaluation_mode: "active_validation"
+      Base-URL-scoped deterministic active-validation benchmark for runtime-only
+      crypto vulnerabilities: padding-oracle error differentials and timing
+      side channels. The suite is intended for authorized local benchmark
+      services and uses bounded probe budgets.
+    phases: [0, 2, 4]
+    evaluation_mode: "base_url_active_validation"
     assumptions:
       - "User supplies the explicit base URL of their own benchmark service."
-      - "The benchmark environment permits active oracle and timing probes."
-      - "Timing targets expose benchmark test vectors for deterministic validation."
+      - "The scanner may send deterministic validation probes to known runtime surfaces."
+      - "Timing validation is calibrated for local benchmark conditions."
     non_goals:
       - "TLS posture assessment"
-      - "broad crawling"
-      - "application-layer classification already covered by phase03"
-      - "real-world exploit chain execution"
+      - "JWT exploitation"
+      - "large-scale timing exploitation over noisy networks"
     request_budget:
-      padding_probe_max: 16
-      timing_probe_max: 72
-      total_actions_recommended_max: 96
+      padding_probe_max: 8
+      timing_probe_max: 48
+      total_actions_recommended_max: 80
     required_capabilities:
-      - "mutate_cbc_ciphertexts"
-      - "cluster_error_responses"
-      - "measure_prefix_timing"
-      - "suppress_secure_controls"
+      - "validate_padding_oracle_error_differentials"
+      - "validate_timing_side_channel_with_repeated_probes"
+      - "emit_reproducible_active_validation_evidence"
     release_gate:
       precision_min: 0.95
       recall_min: 0.95
       negative_control_false_positives_allowed: 0
+      repeated_runs_min: 10
       budget_compliance_required: true
+    score_weights:
+      active_validation_recall: 0.60
+      active_validation_precision: 0.25
+      negative_control_suppression: 0.10
+      request_budget: 0.05
     target_ids:
-      - A-01
-      - A-02
+      - V-01
+      - V-02
     negative_control_ids:
-      - A-NC-01
-      - A-NC-02
+      - V-NC-01
     recommended_base_url: "http://localhost:9000"
   phase05:
     name: "Phase 5 Operational Robustness MVP"
@@ -587,6 +589,18 @@ phase04_contract:
   suite_categories:
     - "PaddingOracle"
     - "TimingLeak"
+  input_contract:
+    allowed_schemes: ["http", "https"]
+    same_origin_required: true
+    bounded_active_probes_required: true
+  request_accounting:
+    action_types:
+      - "padding_probe"
+      - "timing_probe"
+      - "retry"
+    retry_policy:
+      max_retries_per_action: 1
+      count_retries_as_actions: true
   evidence_contract:
     common_required_keys:
       - "observation_ids"
@@ -840,36 +854,40 @@ phase03_negative_controls:
     mapped_benchmark: "NC-03"
 
 phase04_targets:
-  A-01:
+  V-01:
     name: "Padding oracle active validation"
     target_url: "http://localhost:9000/"
     endpoint_path: "/api/decrypt"
     methods: ["POST"]
     surface_kind: "decryption_oracle"
+    category: "PaddingOracle"
+    algorithm: "AES-128-CBC-PKCS7"
+    severity: "critical"
+    min_confidence: 0.7
+    detection_channel: "CH3:ERROR_DIFFERENTIAL"
     mapped_benchmark: "BM-06"
-  A-02:
+  V-02:
     name: "Timing leak active validation"
     target_url: "http://localhost:9000/"
     endpoint_path: "/api/verify-hmac"
     methods: ["POST"]
     surface_kind: "hmac_verifier"
+    category: "TimingLeak"
+    algorithm: "HMAC-SHA256-non-constant-time"
+    severity: "medium"
+    min_confidence: 0.5
+    detection_channel: "CH4:TIMING_SIDE_CHANNEL"
     mapped_benchmark: "BM-10"
 
 phase04_negative_controls:
-  A-NC-01:
-    name: "Uniform CBC decryption errors"
-    target_url: "http://localhost:9000/"
-    endpoint_path: "/api/decrypt-secure"
-    methods: ["POST"]
-    surface_kind: "decryption_oracle"
-    category: "PaddingOracle"
-  A-NC-02:
-    name: "Constant-time HMAC verification"
+  V-NC-01:
+    name: "Constant-time HMAC verifier control"
     target_url: "http://localhost:9000/"
     endpoint_path: "/api/verify-hmac-secure"
     methods: ["POST"]
     surface_kind: "hmac_verifier"
     category: "TimingLeak"
+    mapped_benchmark: "NC-03"
 
 phase05_targets:
   O-01:

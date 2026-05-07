@@ -1339,7 +1339,6 @@ def score_phase01_reports(
 
     return score
 
-
 def score_findings(
     findings: list[dict[str, Any]],
     ground_truth_path: str = "benchmarks/ground_truth.yaml",

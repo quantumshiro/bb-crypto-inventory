@@ -466,7 +466,6 @@ async def run_phase03_suite(
         "total_findings": len(report.get("classifications", [])),
     }
 
-
 async def run_phase04_suite(
     config: Config,
     base_url: str,

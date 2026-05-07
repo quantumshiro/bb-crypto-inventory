@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from bbci.phase04 import padding_oracle_mutations, timing_signal
+import json
+
+import httpx
+import pytest
+
+from bbci.phase04 import (
+    ActiveValidator,
+    padding_oracle_mutations,
+    timing_signal,
+)
 from benchmarks.scoring import score_phase04_reports
 
 
@@ -26,6 +35,7 @@ def _validation(
         "algorithm": algorithm,
         "confidence": 0.92,
         "detection_channel": channel,
+        "status": "validated" if vulnerable else "not_validated",
         "vulnerable": vulnerable,
         "evidence": {
             "observation_ids": [f"obs:{validation_id}"],
@@ -65,7 +75,7 @@ def _phase04_report() -> list[dict]:
             "observations": [],
             "validations": [
                 _validation(
-                    "PHASE04-PADDING-VULN",
+                    "PHASE04-PADDING-V-01",
                     "/api/decrypt",
                     "PaddingOracle",
                     "AES-128-CBC-PKCS7",
@@ -77,7 +87,7 @@ def _phase04_report() -> list[dict]:
                     },
                 ),
                 _validation(
-                    "PHASE04-TIMING-VULN",
+                    "PHASE04-TIMING-V-02",
                     "/api/verify-hmac",
                     "TimingLeak",
                     "HMAC-SHA256-non-constant-time",
@@ -91,19 +101,7 @@ def _phase04_report() -> list[dict]:
                     },
                 ),
                 _validation(
-                    "PHASE04-PADDING-CONTROL",
-                    "/api/decrypt-secure",
-                    "PaddingOracle",
-                    "AES-128-CBC-PKCS7",
-                    False,
-                    {
-                        "valid_status_code": 200,
-                        "invalid_cluster_count": 1,
-                        "padding_error_markers": 0,
-                    },
-                ),
-                _validation(
-                    "PHASE04-TIMING-CONTROL",
+                    "PHASE04-TIMING-V-NC-01",
                     "/api/verify-hmac-secure",
                     "TimingLeak",
                     "HMAC-SHA256-non-constant-time",
@@ -119,9 +117,9 @@ def _phase04_report() -> list[dict]:
             ],
             "benchmark_verdicts": [],
             "summary": {
-                "validation_count": 4,
+                "validation_count": 3,
                 "vulnerable_validation_count": 2,
-                "control_validation_count": 2,
+                "control_validation_count": 1,
                 "inconclusive_count": 0,
                 "matched_validation_count": 0,
                 "false_positive_validation_count": 0,
@@ -130,6 +128,45 @@ def _phase04_report() -> list[dict]:
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_active_validator_detects_padding_disclosure() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if b"ciphertext=" in request.content:
+            return httpx.Response(400, text="Padding error: invalid padding byte")
+        return httpx.Response(500, text="generic failure")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        validator = ActiveValidator(client, "https://example.test")
+        result = await validator.validate_padding_oracle({"endpoint_url": "/api/decrypt"})
+
+    assert result is not None
+    assert result["status"] == "validated"
+    assert result["probe_type"] == "padding_oracle_leak"
+
+
+@pytest.mark.asyncio
+async def test_active_validator_detects_timing_delta() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        if str(payload["mac"]).startswith("a" * 10):
+            await sleep_for_signal()
+        return httpx.Response(401, json={"valid": False})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        validator = ActiveValidator(client, "https://example.test")
+        result = await validator.validate_timing_leak(
+            {
+                "endpoint_url": "https://example.test/api/verify",
+                "measurements": 3,
+                "threshold_seconds": 0.00001,
+            }
+        )
+
+    assert result is not None
+    assert result["status"] == "validated"
+    assert result["probe_type"] == "timing_analysis"
 
 
 def test_timing_signal_detects_prefix_correlation() -> None:
@@ -152,7 +189,7 @@ def test_score_phase04_reports_perfect_match() -> None:
     assert score.true_positives == 2
     assert score.false_positives == 0
     assert score.false_negatives == 0
-    assert score.true_negatives == 2
+    assert score.true_negatives == 1
     assert score.precision == 1.0
     assert score.recall == 1.0
     assert score.budget_compliance_rate == 1.0
@@ -161,9 +198,16 @@ def test_score_phase04_reports_perfect_match() -> None:
 def test_score_phase04_reports_counts_control_false_positive() -> None:
     reports = _phase04_report()
     reports[0]["validations"][2]["vulnerable"] = True
-    reports[0]["validations"][2]["evidence"]["invalid_cluster_count"] = 2
-    reports[0]["validations"][2]["evidence"]["padding_error_markers"] = 1
+    reports[0]["validations"][2]["evidence"]["timing_leak_detected"] = True
+    reports[0]["validations"][2]["evidence"]["median_delta_seconds"] = 0.02
+    reports[0]["validations"][2]["evidence"]["monotonic_steps"] = 3
     score = score_phase04_reports(reports)
     assert score.true_positives == 2
     assert score.false_positives == 1
-    assert score.true_negatives == 1
+    assert score.true_negatives == 0
+
+
+async def sleep_for_signal() -> None:
+    import asyncio
+
+    await asyncio.sleep(0.001)

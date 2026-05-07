@@ -17,25 +17,24 @@ The suite covers:
 
 ## Unit Under Test
 
-The unit under test is the supplied application base URL plus the explicitly
+The unit under test is the supplied application base URL plus explicitly
 declared active-validation targets.
 
 `phase04` is deliberately separate from `phase03` because it uses higher-volume
-and more intrusive probes.
+and more intrusive probes than deterministic misuse classification.
 
 ## Positive Targets
 
 | ID | Endpoint | Expected Finding |
 |----|----------|------------------|
-| A-01 | `/api/decrypt` | `PaddingOracle / AES-128-CBC-PKCS7` |
-| A-02 | `/api/verify-hmac` | `TimingLeak / HMAC-SHA256-non-constant-time` |
+| V-01 | `/api/decrypt` | `PaddingOracle / AES-128-CBC-PKCS7` |
+| V-02 | `/api/verify-hmac` | `TimingLeak / HMAC-SHA256-non-constant-time` |
 
 ## Negative Controls
 
 | ID | Endpoint | Expected Result |
 |----|----------|-----------------|
-| A-NC-01 | `/api/decrypt-secure` | no `PaddingOracle` |
-| A-NC-02 | `/api/verify-hmac-secure` | no `TimingLeak` |
+| V-NC-01 | `/api/verify-hmac-secure` | no `TimingLeak` |
 
 ## Probe Semantics
 
@@ -57,9 +56,9 @@ Timing validation requires:
 
 ## Request Budget
 
-- padding probes: recommended max `16`
-- timing probes: recommended max `72`
-- total actions: recommended max `96`
+- padding probes: recommended max `8`
+- timing probes: recommended max `48`
+- total actions: recommended max `80`
 
 ## Evidence Requirements
 

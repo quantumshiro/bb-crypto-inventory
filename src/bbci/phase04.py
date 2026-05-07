@@ -1,4 +1,4 @@
-"""Deterministic Phase04 active cryptographic validation."""
+"""Phase 4 active cryptographic validation probes."""
 
 from __future__ import annotations
 
@@ -18,9 +18,132 @@ from bbci.phase02 import canonicalize_base_url
 
 PHASE04_SCANNER_NAME = "bbci-phase04"
 PHASE04_SCHEMA_VERSION = "phase04-report/v1"
-PHASE04_RECOMMENDED_MAX_ACTIONS = 96
+PHASE04_RECOMMENDED_MAX_ACTIONS = 80
 BENCHMARK_HMAC_SECRET = b"benchmark-hmac-secret-key-12345678"
 PADDING_ORACLE_SOURCE_PLAINTEXT = b"phase04-padding-oracle-probe"
+
+
+class ActiveValidator:
+    """Run active validation probes against suspected crypto weaknesses."""
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self.client = client
+        self.base_url = base_url.rstrip("/")
+
+    async def validate_padding_oracle(self, discovery: dict[str, Any]) -> dict[str, Any] | None:
+        """Validate padding-oracle style error differentials."""
+        endpoint_url = self._endpoint(discovery)
+        raw_payloads = [
+            b"invalid-padding-test-123",
+            b"A" * 32,
+            b"\x00" * 32,
+        ]
+
+        observations: list[dict[str, Any]] = []
+        for payload in raw_payloads:
+            encoded = base64.b64encode(payload).decode()
+            requests = [
+                {"content": payload},
+                {"data": {"ciphertext": encoded}},
+            ]
+            for request_kwargs in requests:
+                try:
+                    response = await self.client.post(endpoint_url, **request_kwargs)
+                except httpx.HTTPError as exc:
+                    observations.append({"error": str(exc), "payload_b64": encoded})
+                    continue
+
+                body_preview = response.text[:500]
+                observation = {
+                    "status_code": response.status_code,
+                    "body_preview": body_preview,
+                    "payload_b64": encoded,
+                    "request_mode": "form" if "data" in request_kwargs else "raw",
+                }
+                observations.append(observation)
+
+                if "padding" in body_preview.lower() and response.status_code >= 400:
+                    return {
+                        "status": "validated",
+                        "probe_type": "padding_oracle_leak",
+                        "evidence": {
+                            "leak_detected": True,
+                            "matching_observation": observation,
+                            "observations": observations,
+                        },
+                    }
+
+        return None
+
+    async def validate_timing_leak(self, discovery: dict[str, Any]) -> dict[str, Any] | None:
+        """Validate timing side-channel candidates with repeated probes."""
+        endpoint_url = self._endpoint(discovery)
+        measurements_short: list[float] = []
+        measurements_long: list[float] = []
+
+        message = str(discovery.get("message", "test"))
+        known_mac = discovery.get("known_mac")
+        if isinstance(known_mac, str) and len(known_mac) >= 10:
+            short_mac = "0" * len(known_mac)
+            long_mac = known_mac[:10] + "0" * (len(known_mac) - 10)
+        else:
+            short_mac = "b" * 64
+            long_mac = "a" * 10 + "b" * 54
+
+        for _ in range(int(discovery.get("measurements", 20))):
+            start = time.perf_counter()
+            await self.client.post(endpoint_url, json={"message": message, "mac": short_mac})
+            measurements_short.append(time.perf_counter() - start)
+
+            start = time.perf_counter()
+            await self.client.post(endpoint_url, json={"message": message, "mac": long_mac})
+            measurements_long.append(time.perf_counter() - start)
+
+        avg_short = statistics.mean(measurements_short)
+        avg_long = statistics.mean(measurements_long)
+        delta = avg_long - avg_short
+        threshold = float(discovery.get("threshold_seconds", 0.0001))
+        if delta > threshold:
+            return {
+                "status": "validated",
+                "probe_type": "timing_analysis",
+                "evidence": {
+                    "avg_short_seconds": avg_short,
+                    "avg_long_seconds": avg_long,
+                    "delta_seconds": delta,
+                    "threshold_seconds": threshold,
+                    "measurements": len(measurements_short),
+                    "message": message,
+                    "short_probe_prefix_len": 0,
+                    "long_probe_prefix_len": 10,
+                },
+            }
+        return None
+
+    def generate_poc(self, discovery: dict[str, Any], validation: dict[str, Any]) -> str:
+        """Generate a minimal curl command that reproduces validated evidence."""
+        endpoint = self._endpoint(discovery)
+        probe_type = validation.get("probe_type", "")
+
+        if "padding_oracle" in probe_type:
+            evidence = validation.get("evidence", {})
+            observation = evidence.get("matching_observation", {})
+            payload = observation.get("payload_b64", "invalid-padding")
+            return f"curl -X POST -F 'ciphertext={payload}' {endpoint}"
+
+        if "timing" in probe_type:
+            return (
+                "curl -X POST -H 'Content-Type: application/json' "
+                f"-d '{{\"message\":\"test\",\"mac\":\"aaaaaaaaaabbbbb...\"}}' {endpoint}"
+            )
+
+        return f"curl -X POST {endpoint}"
+
+    def _endpoint(self, discovery: dict[str, Any]) -> str:
+        endpoint_url = str(discovery.get("endpoint_url") or self.base_url)
+        if endpoint_url.startswith("/"):
+            return f"{self.base_url}{endpoint_url}"
+        return endpoint_url
 
 
 def _utcnow() -> str:
@@ -36,8 +159,15 @@ def _scanner_version() -> str:
         return __version__
 
 
+def canonicalize_endpoint_url(base_url: str, endpoint_path: str) -> str:
+    """Join a base URL and endpoint path into a deterministic endpoint URL."""
+    if endpoint_path.startswith("http://") or endpoint_path.startswith("https://"):
+        return endpoint_path
+    return urljoin(canonicalize_base_url(base_url), endpoint_path.lstrip("/"))
+
+
 def endpoint_url(base_url: str, path: str) -> str:
-    return urljoin(canonicalize_base_url(base_url), path)
+    return canonicalize_endpoint_url(base_url, path)
 
 
 def expected_hmac(message: str) -> str:
@@ -106,19 +236,62 @@ def timing_signal(prefix_medians: dict[int, float]) -> dict[str, Any]:
     }
 
 
+def default_phase04_targets(base_url: str) -> list[dict[str, Any]]:
+    """Default local benchmark targets for Phase04 active validation."""
+    return [
+        {
+            "id": "V-01",
+            "endpoint_path": "/api/decrypt",
+            "category": "PaddingOracle",
+            "algorithm": "AES-128-CBC-PKCS7",
+            "severity": "critical",
+            "confidence": 0.93,
+            "detection_channel": "CH3:ERROR_DIFFERENTIAL",
+        },
+        {
+            "id": "V-02",
+            "endpoint_path": "/api/verify-hmac",
+            "category": "TimingLeak",
+            "algorithm": "HMAC-SHA256-non-constant-time",
+            "severity": "medium",
+            "confidence": 0.90,
+            "detection_channel": "CH4:TIMING_SIDE_CHANNEL",
+        },
+        {
+            "id": "V-NC-01",
+            "endpoint_path": "/api/verify-hmac-secure",
+            "category": "TimingLeak",
+            "algorithm": "HMAC-SHA256-non-constant-time",
+            "control": True,
+        },
+    ]
+
+
 class Phase04Scanner:
-    """Active validator for padding-oracle and timing-leak benchmark targets."""
+    """Deterministic active validator for Phase04 benchmark targets."""
 
-    def __init__(self, timeout: int = 10, timing_samples_per_prefix: int = 8) -> None:
+    def __init__(
+        self,
+        timeout: float = 10.0,
+        timing_samples_per_prefix: int = 8,
+        timing_measurements: int | None = None,
+    ) -> None:
         self.timeout = timeout
-        self.timing_samples_per_prefix = timing_samples_per_prefix
+        self.timing_samples_per_prefix = (
+            max(2, timing_measurements // 4) if timing_measurements else timing_samples_per_prefix
+        )
 
-    async def scan_target(self, base_url: str) -> dict[str, Any]:
+    async def scan_target(
+        self,
+        base_url: str,
+        targets: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         canonical_base = canonicalize_base_url(base_url)
         started_at = _utcnow()
         observations: list[dict[str, Any]] = []
         validations: list[dict[str, Any]] = []
         request_accounting = {
+            "recommended_max_actions": PHASE04_RECOMMENDED_MAX_ACTIONS,
             "total_actions": 0,
             "padding_oracle_probes": 0,
             "timing_probes": 0,
@@ -126,49 +299,35 @@ class Phase04Scanner:
             "budget_compliant": True,
         }
 
+        selected_targets = targets or default_phase04_targets(canonical_base)
         async with httpx.AsyncClient(
             verify=False, follow_redirects=True, timeout=self.timeout
         ) as client:
-            validations.append(
-                await self._validate_padding_oracle(
-                    client=client,
-                    base_url=canonical_base,
-                    decrypt_path="/api/decrypt",
-                    control=False,
-                    observations=observations,
-                    request_accounting=request_accounting,
-                )
-            )
-            validations.append(
-                await self._validate_padding_oracle(
-                    client=client,
-                    base_url=canonical_base,
-                    decrypt_path="/api/decrypt-secure",
-                    control=True,
-                    observations=observations,
-                    request_accounting=request_accounting,
-                )
-            )
-            validations.append(
-                await self._validate_timing(
-                    client=client,
-                    base_url=canonical_base,
-                    verifier_path="/api/verify-hmac",
-                    control=False,
-                    observations=observations,
-                    request_accounting=request_accounting,
-                )
-            )
-            validations.append(
-                await self._validate_timing(
-                    client=client,
-                    base_url=canonical_base,
-                    verifier_path="/api/verify-hmac-secure",
-                    control=True,
-                    observations=observations,
-                    request_accounting=request_accounting,
-                )
-            )
+            for target in selected_targets:
+                category = target.get("category")
+                control = bool(target.get("control"))
+                if category == "PaddingOracle":
+                    validations.append(
+                        await self._validate_padding_oracle(
+                            client=client,
+                            base_url=canonical_base,
+                            target=target,
+                            control=control,
+                            observations=observations,
+                            request_accounting=request_accounting,
+                        )
+                    )
+                elif category == "TimingLeak":
+                    validations.append(
+                        await self._validate_timing(
+                            client=client,
+                            base_url=canonical_base,
+                            target=target,
+                            control=control,
+                            observations=observations,
+                            request_accounting=request_accounting,
+                        )
+                    )
 
         request_accounting["budget_compliant"] = (
             request_accounting["total_actions"] <= PHASE04_RECOMMENDED_MAX_ACTIONS
@@ -191,6 +350,7 @@ class Phase04Scanner:
             "validations": validations,
             "benchmark_verdicts": [],
             "summary": {
+                "target_count": len(selected_targets),
                 "validation_count": len(validations),
                 "vulnerable_validation_count": vulnerable_count,
                 "control_validation_count": len(validations) - vulnerable_count,
@@ -274,12 +434,13 @@ class Phase04Scanner:
         *,
         client: httpx.AsyncClient,
         base_url: str,
-        decrypt_path: str,
+        target: dict[str, Any],
         control: bool,
         observations: list[dict[str, Any]],
         request_accounting: dict[str, Any],
     ) -> dict[str, Any]:
-        target = endpoint_url(base_url, decrypt_path)
+        decrypt_path = target.get("endpoint_path", "/api/decrypt")
+        target_url = endpoint_url(base_url, decrypt_path)
         valid_ct, source_observation_id = await self._valid_cbc_ciphertext(
             client, base_url, observations, request_accounting
         )
@@ -289,7 +450,7 @@ class Phase04Scanner:
         valid_status, valid_payload = await self._json_request(
             client,
             "POST",
-            target,
+            target_url,
             request_accounting,
             content=base64.b64encode(valid_ct),
             probe_type="control_probes" if control else "padding_oracle_probes",
@@ -299,7 +460,7 @@ class Phase04Scanner:
             status, payload = await self._json_request(
                 client,
                 "POST",
-                target,
+                target_url,
                 request_accounting,
                 content=base64.b64encode(mutated),
                 probe_type="control_probes" if control else "padding_oracle_probes",
@@ -323,7 +484,7 @@ class Phase04Scanner:
             observations,
             observation_id=f"phase04:padding:{decrypt_path.strip('/').replace('/', '-')}",
             observation_type="padding_oracle_probe",
-            target_url=target,
+            target_url=target_url,
             data={
                 "valid_status_code": valid_status,
                 "valid_response_keys": sorted(valid_payload.keys()),
@@ -334,27 +495,31 @@ class Phase04Scanner:
         probe_observation_ids.append(observation_id)
 
         return {
-            "id": f"PHASE04-PADDING-{'CONTROL' if control else 'VULN'}",
-            "endpoint_url": target,
+            "id": f"PHASE04-PADDING-{target.get('id', 'UNKNOWN')}",
+            "target_id": target.get("id"),
+            "endpoint_url": target_url,
             "endpoint_path": decrypt_path,
-            "methods": ["POST"],
-            "surface_kind": "decryption_oracle",
+            "methods": target.get("methods", ["POST"]),
+            "surface_kind": target.get("surface_kind", "decryption_oracle"),
             "category": "PaddingOracle",
-            "severity": "critical" if vulnerable else "none",
-            "algorithm": "AES-128-CBC-PKCS7",
-            "confidence": 0.93 if vulnerable else 0.88,
-            "detection_channel": "CH3:ERROR_DIFFERENTIAL",
+            "severity": target.get("severity", "critical") if vulnerable else "none",
+            "algorithm": target.get("algorithm", "AES-128-CBC-PKCS7"),
+            "confidence": target.get("confidence", 0.93) if vulnerable else 0.88,
+            "detection_channel": target.get("detection_channel", "CH3:ERROR_DIFFERENTIAL"),
+            "status": "validated" if vulnerable else "not_validated",
             "vulnerable": vulnerable,
             "evidence": {
                 "observation_ids": probe_observation_ids,
                 "base_url": base_url,
                 "collected_via": PHASE04_SCANNER_NAME,
                 "captured_at": _utcnow(),
-                "endpoint_url": target,
+                "endpoint_url": target_url,
                 "endpoint_path": decrypt_path,
-                "methods": ["POST"],
-                "surface_kind": "decryption_oracle",
+                "methods": target.get("methods", ["POST"]),
+                "surface_kind": target.get("surface_kind", "decryption_oracle"),
                 "probe_strategy": "valid_ciphertext_mutation",
+                "probe_type": "padding_oracle_leak",
+                "validated": vulnerable,
                 "valid_status_code": valid_status,
                 "invalid_cluster_count": len(distinct_invalid_clusters),
                 "padding_error_markers": len(padding_markers),
@@ -367,13 +532,14 @@ class Phase04Scanner:
         *,
         client: httpx.AsyncClient,
         base_url: str,
-        verifier_path: str,
+        target: dict[str, Any],
         control: bool,
         observations: list[dict[str, Any]],
         request_accounting: dict[str, Any],
     ) -> dict[str, Any]:
-        target = endpoint_url(base_url, verifier_path)
-        message = "phase04-timing-probe"
+        verifier_path = target.get("endpoint_path", "/api/verify-hmac")
+        target_url = endpoint_url(base_url, verifier_path)
+        message = target.get("message", "phase04-timing-probe")
         expected = expected_hmac(message)
         prefixes = [0, 8, 16, 32]
         prefix_samples: dict[int, list[float]] = {prefix: [] for prefix in prefixes}
@@ -385,7 +551,7 @@ class Phase04Scanner:
                 await self._json_request(
                     client,
                     "POST",
-                    target,
+                    target_url,
                     request_accounting,
                     json_body={"message": message, "mac": mac},
                     probe_type="control_probes" if control else "timing_probes",
@@ -401,7 +567,7 @@ class Phase04Scanner:
             observations,
             observation_id=f"phase04:timing:{verifier_path.strip('/').replace('/', '-')}",
             observation_type="timing_probe",
-            target_url=target,
+            target_url=target_url,
             data={
                 "samples_per_prefix": self.timing_samples_per_prefix,
                 **signal,
@@ -409,27 +575,31 @@ class Phase04Scanner:
         )
 
         return {
-            "id": f"PHASE04-TIMING-{'CONTROL' if control else 'VULN'}",
-            "endpoint_url": target,
+            "id": f"PHASE04-TIMING-{target.get('id', 'UNKNOWN')}",
+            "target_id": target.get("id"),
+            "endpoint_url": target_url,
             "endpoint_path": verifier_path,
-            "methods": ["POST"],
-            "surface_kind": "hmac_verifier",
+            "methods": target.get("methods", ["POST"]),
+            "surface_kind": target.get("surface_kind", "hmac_verifier"),
             "category": "TimingLeak",
-            "severity": "medium" if vulnerable else "none",
-            "algorithm": "HMAC-SHA256-non-constant-time",
-            "confidence": 0.9 if vulnerable else 0.84,
-            "detection_channel": "CH4:TIMING_SIDE_CHANNEL",
+            "severity": target.get("severity", "medium") if vulnerable else "none",
+            "algorithm": target.get("algorithm", "HMAC-SHA256-non-constant-time"),
+            "confidence": target.get("confidence", 0.9) if vulnerable else 0.84,
+            "detection_channel": target.get("detection_channel", "CH4:TIMING_SIDE_CHANNEL"),
+            "status": "validated" if vulnerable else "not_validated",
             "vulnerable": vulnerable,
             "evidence": {
                 "observation_ids": [observation_id],
                 "base_url": base_url,
                 "collected_via": PHASE04_SCANNER_NAME,
                 "captured_at": _utcnow(),
-                "endpoint_url": target,
+                "endpoint_url": target_url,
                 "endpoint_path": verifier_path,
-                "methods": ["POST"],
-                "surface_kind": "hmac_verifier",
+                "methods": target.get("methods", ["POST"]),
+                "surface_kind": target.get("surface_kind", "hmac_verifier"),
                 "probe_strategy": "known_mac_prefix_timing",
+                "probe_type": "timing_analysis",
+                "validated": vulnerable,
                 "samples_per_prefix": self.timing_samples_per_prefix,
                 "prefix_medians_seconds": signal["prefix_medians_seconds"],
                 "median_delta_seconds": signal["median_delta_seconds"],

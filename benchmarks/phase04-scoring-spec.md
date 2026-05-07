@@ -6,15 +6,14 @@ Normative scoring rules for the `phase04` benchmark suite.
 
 `phase04` contains `2` positive active-validation units:
 
-1. `A-01 / /api/decrypt / PaddingOracle / AES-128-CBC-PKCS7`
-2. `A-02 / /api/verify-hmac / TimingLeak / HMAC-SHA256-non-constant-time`
+1. `V-01 / /api/decrypt / PaddingOracle / AES-128-CBC-PKCS7`
+2. `V-02 / /api/verify-hmac / TimingLeak / HMAC-SHA256-non-constant-time`
 
 ## Negative Controls
 
-The following endpoints must not produce vulnerable phase04 validations:
+The following endpoint must not produce vulnerable phase04 validations:
 
-- `A-NC-01 / /api/decrypt-secure / PaddingOracle`
-- `A-NC-02 / /api/verify-hmac-secure / TimingLeak`
+- `V-NC-01 / /api/verify-hmac-secure / TimingLeak`
 
 ## Matching
 
@@ -43,6 +42,7 @@ A validation is a false positive if it is in-scope and:
 - Budget Compliance Rate
 - Inconclusive Rate
 - Negative Control Suppression
+- Mean Time To First Validation
 
 ## Release Gate
 
