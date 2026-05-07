@@ -7,6 +7,8 @@ Usage:
     python -m benchmarks.runner --target http://localhost:9000 --suite phase01
     python -m benchmarks.runner --target http://localhost:9000 --suite phase02
     python -m benchmarks.runner --target http://localhost:9000 --suite phase03
+    python -m benchmarks.runner --target http://localhost:9000 --suite phase04
+    python -m benchmarks.runner --target http://localhost:9000 --suite phase05
     python -m benchmarks.runner --target http://localhost:9000 --suite phase01 --benchmark BM-09
     python -m benchmarks.runner --target http://localhost:9000 --report results/
 """
@@ -27,12 +29,16 @@ from bbci.config import Config
 from bbci.phase01 import Phase01Scanner, canonicalize_https_url
 from bbci.phase02 import Phase02Scanner, canonicalize_base_url
 from bbci.phase03 import Phase03Scanner
+from bbci.phase04 import Phase04Scanner
+from bbci.phase05 import Phase05Scanner
 from benchmarks.scoring import (
     load_ground_truth,
     score_findings,
     score_phase01_reports,
     score_phase02_reports,
     score_phase03_reports,
+    score_phase04_reports,
+    score_phase05_reports,
 )
 
 logger = logging.getLogger("bbci.benchmark")
@@ -178,6 +184,10 @@ async def run_benchmarks(
         return await run_phase02_suite(config, base_url, ground_truth_path, benchmark_filter)
     if suite == "phase03":
         return await run_phase03_suite(config, base_url, ground_truth_path, benchmark_filter)
+    if suite == "phase04":
+        return await run_phase04_suite(config, base_url, ground_truth_path, benchmark_filter)
+    if suite == "phase05":
+        return await run_phase05_suite(config, base_url, ground_truth_path, benchmark_filter)
 
     benchmarks = gt.get("benchmarks", {})
     suite_def: dict | None = None
@@ -457,6 +467,118 @@ async def run_phase03_suite(
     }
 
 
+async def run_phase04_suite(
+    config: Config,
+    base_url: str,
+    ground_truth_path: str,
+    benchmark_filter: str | None = None,
+) -> dict:
+    """Run the deterministic phase04 suite against a base URL."""
+    gt = load_ground_truth(ground_truth_path)
+    suite_def = gt["benchmark_suites"]["phase04"]
+    scanner = Phase04Scanner(timeout=10)
+
+    target_ids = list(suite_def.get("target_ids", []))
+    negative_control_ids = list(suite_def.get("negative_control_ids", []))
+    all_ids = target_ids + negative_control_ids
+    if benchmark_filter:
+        all_ids = [target_id for target_id in all_ids if target_id == benchmark_filter]
+        if not all_ids:
+            raise ValueError(f"Unknown phase04 benchmark filter: {benchmark_filter}")
+
+    logger.info("Running phase04 active validation against %s", base_url)
+    report = await scanner.scan_target(base_url)
+    score = score_phase04_reports(
+        [report],
+        ground_truth_path,
+        target_ids=[
+            target_id for target_id in all_ids if target_id in gt.get("phase04_targets", {})
+        ],
+        negative_control_ids=[
+            target_id
+            for target_id in all_ids
+            if target_id in gt.get("phase04_negative_controls", {})
+        ],
+    )
+    report["benchmark_verdicts"] = list(score.benchmark_verdicts)
+    report["summary"]["matched_validation_count"] = score.true_positives
+    report["summary"]["false_positive_validation_count"] = score.false_positives
+    report["summary"]["missed_expected_count"] = score.false_negatives
+
+    return {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "target": canonicalize_base_url(base_url),
+        "model": config.agent.model,
+        "suite": "phase04",
+        "suite_description": suite_def.get("description"),
+        "phases": suite_def.get("phases", []),
+        "benchmarks_run": len(all_ids),
+        "benchmark_results": [
+            {
+                "target": canonicalize_base_url(base_url),
+                "target_ids": all_ids,
+                "validation_count": len(report.get("validations", [])),
+                "request_accounting": report.get("request_accounting", {}),
+                "summary": report.get("summary", {}),
+                "success": True,
+            }
+        ],
+        "phase04_reports": [report],
+        "scoring": score.summary(),
+        "total_findings": sum(
+            1 for validation in report.get("validations", []) if validation.get("vulnerable")
+        ),
+    }
+
+
+async def run_phase05_suite(
+    config: Config,
+    base_url: str,
+    ground_truth_path: str,
+    benchmark_filter: str | None = None,
+) -> dict:
+    """Run the deterministic phase05 suite against a base URL."""
+    gt = load_ground_truth(ground_truth_path)
+    suite_def = gt["benchmark_suites"]["phase05"]
+    scanner = Phase05Scanner(timeout=10)
+
+    target_ids = list(suite_def.get("target_ids", []))
+    if benchmark_filter:
+        target_ids = [target_id for target_id in target_ids if target_id == benchmark_filter]
+        if not target_ids:
+            raise ValueError(f"Unknown phase05 benchmark filter: {benchmark_filter}")
+
+    logger.info("Running phase05 operational robustness against %s", base_url)
+    report = await scanner.scan_target(base_url)
+    score = score_phase05_reports([report], ground_truth_path, target_ids=target_ids)
+    report["benchmark_verdicts"] = list(score.benchmark_verdicts)
+    report["summary"]["matched_operational_count"] = score.true_positives
+    report["summary"]["missed_expected_count"] = score.false_negatives
+
+    return {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "target": canonicalize_base_url(base_url),
+        "model": config.agent.model,
+        "suite": "phase05",
+        "suite_description": suite_def.get("description"),
+        "phases": suite_def.get("phases", []),
+        "benchmarks_run": len(target_ids),
+        "benchmark_results": [
+            {
+                "target": canonicalize_base_url(base_url),
+                "target_ids": target_ids,
+                "operational_result_count": len(report.get("operational_results", [])),
+                "request_accounting": report.get("request_accounting", {}),
+                "summary": report.get("summary", {}),
+                "success": True,
+            }
+        ],
+        "phase05_reports": [report],
+        "scoring": score.summary(),
+        "total_findings": 0,
+    }
+
+
 def print_report(results: dict) -> None:
     """Print a human-readable benchmark report."""
     scoring = results.get("scoring", {})
@@ -480,9 +602,9 @@ def print_report(results: dict) -> None:
     print(f"  F1 Score:         {scoring.get('f1_score', 0):.1%}")
     if results.get("suite") == "phase01":
         print(f"  SSL Grade Acc.:   {scoring.get('ssl_grade_accuracy', 0):.1%}")
-    if results.get("suite") in {"phase01", "phase02", "phase03"}:
+    if results.get("suite") in {"phase01", "phase02", "phase03", "phase04", "phase05"}:
         print(f"  Budget Comp.:     {scoring.get('budget_compliance_rate', 0):.1%}")
-    if results.get("suite") in {"phase01", "phase02", "phase03"}:
+    if results.get("suite") in {"phase01", "phase02", "phase03", "phase04", "phase05"}:
         print(f"  Inconclusive:     {scoring.get('inconclusive_rate', 0):.1%}")
     if results.get("suite") == "phase02":
         print(
@@ -493,6 +615,11 @@ def print_report(results: dict) -> None:
         print(
             "  Mean TTFC:        "
             f"{scoring.get('mean_time_to_first_classification_seconds', 0.0):.3f}s"
+        )
+    if results.get("suite") == "phase04":
+        print(
+            "  Mean TTFV:        "
+            f"{scoring.get('mean_time_to_first_validation_seconds', 0.0):.3f}s"
         )
     print(f"  True Positives:   {scoring.get('true_positives', 0)}")
     print(f"  False Positives:  {scoring.get('false_positives', 0)}")

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bbci.local/schemas/phase04-report.schema.json",
+  "title": "BBCI Phase04 Active Validation Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "suite_id",
+    "scanner",
+    "execution",
+    "request_accounting",
+    "observations",
+    "validations",
+    "benchmark_verdicts",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": { "const": "phase04-report/v1" },
+    "suite_id": { "const": "phase04" },
+    "scanner": { "type": "object" },
+    "execution": { "type": "object" },
+    "request_accounting": { "type": "object" },
+    "observations": { "type": "array" },
+    "validations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "endpoint_url",
+          "endpoint_path",
+          "methods",
+          "surface_kind",
+          "category",
+          "algorithm",
+          "confidence",
+          "detection_channel",
+          "vulnerable",
+          "evidence"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "endpoint_url": { "type": "string", "format": "uri" },
+          "endpoint_path": { "type": "string" },
+          "methods": { "type": "array", "items": { "type": "string" } },
+          "surface_kind": { "type": "string" },
+          "category": { "type": "string" },
+          "severity": { "type": "string" },
+          "algorithm": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+          "detection_channel": { "type": "string" },
+          "vulnerable": { "type": "boolean" },
+          "evidence": { "type": "object" }
+        }
+      }
+    },
+    "benchmark_verdicts": { "type": "array" },
+    "summary": { "type": "object" }
+  }
+}

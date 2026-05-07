@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bbci.local/schemas/phase05-report.schema.json",
+  "title": "BBCI Phase05 Operational Robustness Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "suite_id",
+    "scanner",
+    "execution",
+    "request_accounting",
+    "observations",
+    "operational_results",
+    "benchmark_verdicts",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": { "const": "phase05-report/v1" },
+    "suite_id": { "const": "phase05" },
+    "scanner": { "type": "object" },
+    "execution": { "type": "object" },
+    "request_accounting": { "type": "object" },
+    "observations": { "type": "array" },
+    "operational_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "target_id",
+          "endpoint_url",
+          "endpoint_path",
+          "operation",
+          "status",
+          "passed",
+          "confidence",
+          "evidence"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "target_id": { "type": "string" },
+          "endpoint_url": { "type": "string", "format": "uri" },
+          "endpoint_path": { "type": "string" },
+          "operation": { "type": "string" },
+          "status": { "type": "string" },
+          "passed": { "type": "boolean" },
+          "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+          "evidence": { "type": "object" }
+        }
+      }
+    },
+    "benchmark_verdicts": { "type": "array" },
+    "summary": { "type": "object" }
+  }
+}

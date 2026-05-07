@@ -207,6 +207,82 @@ benchmark_suites:
       - C-NC-02
       - C-NC-03
     recommended_base_url: "http://localhost:9000"
+  phase04:
+    name: "Phase 4 Active Validation MVP"
+    description: >
+      Authorized active-validation benchmark for runtime cryptographic
+      vulnerabilities that require targeted probes: padding-oracle response
+      differentials and HMAC timing leakage. This suite is deliberately
+      separate from phase03 because it sends higher-volume and more intrusive
+      probes.
+    phases: [0, 3]
+    evaluation_mode: "active_validation"
+    assumptions:
+      - "User supplies the explicit base URL of their own benchmark service."
+      - "The benchmark environment permits active oracle and timing probes."
+      - "Timing targets expose benchmark test vectors for deterministic validation."
+    non_goals:
+      - "TLS posture assessment"
+      - "broad crawling"
+      - "application-layer classification already covered by phase03"
+      - "real-world exploit chain execution"
+    request_budget:
+      padding_probe_max: 16
+      timing_probe_max: 72
+      total_actions_recommended_max: 96
+    required_capabilities:
+      - "mutate_cbc_ciphertexts"
+      - "cluster_error_responses"
+      - "measure_prefix_timing"
+      - "suppress_secure_controls"
+    release_gate:
+      precision_min: 0.95
+      recall_min: 0.95
+      negative_control_false_positives_allowed: 0
+      budget_compliance_required: true
+    target_ids:
+      - A-01
+      - A-02
+    negative_control_ids:
+      - A-NC-01
+      - A-NC-02
+    recommended_base_url: "http://localhost:9000"
+  phase05:
+    name: "Phase 5 Operational Robustness MVP"
+    description: >
+      Operational robustness benchmark for constrained and noisy authorized
+      targets. The suite verifies that the scanner handles rate limits,
+      transient failures, and noisy secure timing controls without converting
+      operational noise into cryptographic findings.
+    phases: [0, 3]
+    evaluation_mode: "operational_robustness"
+    assumptions:
+      - "User supplies the explicit base URL of their own benchmark service."
+      - "Operational targets are synthetic and deterministic."
+      - "The correct result may be graceful degradation rather than a vulnerability finding."
+    non_goals:
+      - "new cryptographic misuse categories"
+      - "broad crawling"
+      - "external WAF fingerprinting"
+    request_budget:
+      rate_limit_probe_max: 5
+      transient_probe_max: 2
+      noise_probe_max: 32
+      total_actions_recommended_max: 48
+    required_capabilities:
+      - "detect_rate_limit"
+      - "retry_transient_failure_once"
+      - "avoid_timing_false_positive_under_noise"
+    release_gate:
+      operational_recall_min: 0.95
+      false_operational_failure_allowed: 0
+      budget_compliance_required: true
+    target_ids:
+      - O-01
+      - O-02
+      - O-03
+    negative_control_ids: []
+    recommended_base_url: "http://localhost:9000"
 
 phase01_contract:
   spec_version: "1.0"
@@ -502,6 +578,80 @@ phase03_contract:
     - "true_negative"
     - "inconclusive"
 
+phase04_contract:
+  spec_version: "1.0"
+  spec_paths:
+    suite_spec: "benchmarks/phase04-spec.md"
+    scoring_spec: "benchmarks/phase04-scoring-spec.md"
+    report_schema: "benchmarks/phase04-report.schema.json"
+  suite_categories:
+    - "PaddingOracle"
+    - "TimingLeak"
+  evidence_contract:
+    common_required_keys:
+      - "observation_ids"
+      - "base_url"
+      - "collected_via"
+      - "captured_at"
+      - "endpoint_url"
+      - "endpoint_path"
+      - "methods"
+      - "surface_kind"
+      - "probe_strategy"
+    by_category:
+      PaddingOracle:
+        - "valid_status_code"
+        - "invalid_cluster_count"
+        - "padding_error_markers"
+      TimingLeak:
+        - "samples_per_prefix"
+        - "prefix_medians_seconds"
+        - "median_delta_seconds"
+        - "monotonic_steps"
+        - "timing_leak_detected"
+  verdict_statuses:
+    - "matched"
+    - "missed"
+    - "false_positive"
+    - "true_negative"
+    - "inconclusive"
+
+phase05_contract:
+  spec_version: "1.0"
+  spec_paths:
+    suite_spec: "benchmarks/phase05-spec.md"
+    scoring_spec: "benchmarks/phase05-scoring-spec.md"
+    report_schema: "benchmarks/phase05-report.schema.json"
+  expected_operations:
+    - "rate_limit_handling"
+    - "transient_recovery"
+    - "noisy_secure_timing_suppression"
+  evidence_contract:
+    common_required_keys:
+      - "observation_ids"
+      - "base_url"
+      - "collected_via"
+      - "captured_at"
+    by_operation:
+      rate_limit_handling:
+        - "status_codes"
+        - "saw_429"
+        - "stopped_after_429"
+      transient_recovery:
+        - "status_codes"
+        - "retried_after_503"
+        - "final_status_code"
+      noisy_secure_timing_suppression:
+        - "samples_per_prefix"
+        - "prefix_medians_seconds"
+        - "median_delta_seconds"
+        - "timing_leak_detected"
+  verdict_statuses:
+    - "matched"
+    - "missed"
+    - "false_positive"
+    - "inconclusive"
+
 phase02_targets:
   D-01:
     name: "ECB encryption surface"
@@ -688,6 +838,58 @@ phase03_negative_controls:
     methods: ["GET"]
     surface_kind: "token_issuer"
     mapped_benchmark: "NC-03"
+
+phase04_targets:
+  A-01:
+    name: "Padding oracle active validation"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/decrypt"
+    methods: ["POST"]
+    surface_kind: "decryption_oracle"
+    mapped_benchmark: "BM-06"
+  A-02:
+    name: "Timing leak active validation"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/verify-hmac"
+    methods: ["POST"]
+    surface_kind: "hmac_verifier"
+    mapped_benchmark: "BM-10"
+
+phase04_negative_controls:
+  A-NC-01:
+    name: "Uniform CBC decryption errors"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/decrypt-secure"
+    methods: ["POST"]
+    surface_kind: "decryption_oracle"
+    category: "PaddingOracle"
+  A-NC-02:
+    name: "Constant-time HMAC verification"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/verify-hmac-secure"
+    methods: ["POST"]
+    surface_kind: "hmac_verifier"
+    category: "TimingLeak"
+
+phase05_targets:
+  O-01:
+    name: "Rate limit handling"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/rate-limit-token"
+    operation: "rate_limit_handling"
+    expected_status: "rate_limit_detected"
+  O-02:
+    name: "Transient failure recovery"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/transient-hash"
+    operation: "transient_recovery"
+    expected_status: "transient_recovered"
+  O-03:
+    name: "Noisy secure timing suppression"
+    target_url: "http://localhost:9000/"
+    endpoint_path: "/api/verify-hmac-noisy"
+    operation: "noisy_secure_timing_suppression"
+    expected_status: "no_timing_leak"
 
 # ============================================================
 # Misuse category mapping to standards

@@ -64,6 +64,8 @@ class BenchmarkScore:
     phase01_reports: list[dict[str, Any]] = field(default_factory=list)
     phase02_reports: list[dict[str, Any]] = field(default_factory=list)
     phase03_reports: list[dict[str, Any]] = field(default_factory=list)
+    phase04_reports: list[dict[str, Any]] = field(default_factory=list)
+    phase05_reports: list[dict[str, Any]] = field(default_factory=list)
 
     per_benchmark: dict[str, dict[str, Any]] = field(default_factory=dict)
     per_channel: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -74,6 +76,7 @@ class BenchmarkScore:
     inconclusive_rate: float = 0.0
     mean_time_to_first_relevant_seconds: float = 0.0
     mean_time_to_first_classification_seconds: float = 0.0
+    mean_time_to_first_validation_seconds: float = 0.0
 
     @property
     def precision(self) -> float:
@@ -118,6 +121,9 @@ class BenchmarkScore:
             ),
             "mean_time_to_first_classification_seconds": round(
                 self.mean_time_to_first_classification_seconds, 4
+            ),
+            "mean_time_to_first_validation_seconds": round(
+                self.mean_time_to_first_validation_seconds, 4
             ),
             "per_benchmark": self.per_benchmark,
             "per_channel": self.per_channel,
@@ -318,6 +324,62 @@ def _phase03_classification_evidence_valid(
             and isinstance(evidence.get("response_status_code"), int)
             and evidence["response_status_code"] < 400
         )
+    return True
+
+
+def _phase04_validation_evidence_valid(
+    validation: dict[str, Any], contract: dict[str, Any], category: str
+) -> bool:
+    evidence = validation.get("evidence", {})
+    if not isinstance(evidence, dict):
+        return False
+    required_keys = list(contract.get("evidence_contract", {}).get("common_required_keys", []))
+    required_keys += list(
+        contract.get("evidence_contract", {}).get("by_category", {}).get(category, [])
+    )
+    for key in required_keys:
+        if key not in evidence:
+            return False
+    if evidence.get("endpoint_url") != validation.get("endpoint_url"):
+        return False
+    if category == "PaddingOracle":
+        return (
+            evidence.get("valid_status_code") == 200
+            and int(evidence.get("invalid_cluster_count", 0)) >= 2
+            and int(evidence.get("padding_error_markers", 0)) >= 1
+        )
+    if category == "TimingLeak":
+        return (
+            evidence.get("timing_leak_detected") is True
+            and float(evidence.get("median_delta_seconds", 0.0)) >= 0.006
+            and int(evidence.get("monotonic_steps", 0)) >= 2
+        )
+    return True
+
+
+def _phase05_operational_evidence_valid(result: dict[str, Any], contract: dict[str, Any]) -> bool:
+    evidence = result.get("evidence", {})
+    if not isinstance(evidence, dict):
+        return False
+    required_keys = list(contract.get("evidence_contract", {}).get("common_required_keys", []))
+    required_keys += list(
+        contract.get("evidence_contract", {})
+        .get("by_operation", {})
+        .get(result.get("operation"), [])
+    )
+    for key in required_keys:
+        if key not in evidence:
+            return False
+    operation = result.get("operation")
+    if operation == "rate_limit_handling":
+        return evidence.get("saw_429") is True and evidence.get("stopped_after_429") is True
+    if operation == "transient_recovery":
+        return (
+            evidence.get("retried_after_503") is True
+            and evidence.get("final_status_code") == 200
+        )
+    if operation == "noisy_secure_timing_suppression":
+        return evidence.get("timing_leak_detected") is False
     return True
 
 
@@ -762,6 +824,297 @@ def score_phase03_reports(
         if passed:
             score.true_negatives += 1
 
+    return score
+
+
+def score_phase04_reports(
+    reports: list[dict[str, Any]],
+    ground_truth_path: str = "benchmarks/ground_truth.yaml",
+    target_ids: list[str] | None = None,
+    negative_control_ids: list[str] | None = None,
+) -> BenchmarkScore:
+    """Score phase04 active-validation reports."""
+    gt = load_ground_truth(ground_truth_path)
+    contract = gt.get("phase04_contract", {})
+    suite = gt.get("benchmark_suites", {}).get("phase04", {})
+    targets = gt.get("phase04_targets", {})
+    negative_controls = gt.get("phase04_negative_controls", {})
+    benchmarks = gt.get("benchmarks", {})
+
+    selected_target_ids = target_ids or list(suite.get("target_ids", []))
+    selected_negative_control_ids = negative_control_ids or list(
+        suite.get("negative_control_ids", [])
+    )
+    score = BenchmarkScore()
+    score.phase04_reports = reports
+
+    expected_units: list[tuple[str, str, str, str, float]] = []
+    for target_id in selected_target_ids:
+        target = targets[target_id]
+        benchmark = benchmarks[target["mapped_benchmark"]]
+        expected = benchmark["expected_findings"][0]
+        endpoint_url = canonicalize_endpoint_url(target["target_url"], target["endpoint_path"])
+        score.per_benchmark[target_id] = {
+            "name": target["name"],
+            "expected": 1,
+            "detected": 0,
+            "findings": [],
+        }
+        expected_units.append(
+            (
+                target_id,
+                endpoint_url,
+                expected["category"],
+                expected.get("algorithm", ""),
+                expected.get("min_confidence", 0.5),
+            )
+        )
+    score.total_expected = len(expected_units)
+
+    allowed_urls = {
+        canonicalize_endpoint_url(
+            targets[target_id]["target_url"],
+            targets[target_id]["endpoint_path"],
+        )
+        for target_id in selected_target_ids
+    }
+    allowed_urls.update(
+        canonicalize_endpoint_url(
+            negative_controls[nc_id]["target_url"],
+            negative_controls[nc_id]["endpoint_path"],
+        )
+        for nc_id in selected_negative_control_ids
+    )
+
+    all_vulnerable: list[dict[str, Any]] = []
+    all_validations: list[dict[str, Any]] = []
+    for report in reports:
+        for validation in report.get("validations", []):
+            if validation.get("endpoint_url") in allowed_urls:
+                all_validations.append(validation)
+            if validation.get("endpoint_url") in allowed_urls and validation.get("vulnerable"):
+                all_vulnerable.append(validation)
+    score.total_detected = len(all_vulnerable)
+
+    matched_ids: set[str] = set()
+    validation_times: list[float] = []
+    budget_reports = 0
+    budget_compliant_reports = 0
+    inconclusive_reports = 0
+
+    for target_id, endpoint_url, category, algorithm, min_confidence in expected_units:
+        candidates = []
+        for validation in all_vulnerable:
+            if validation.get("id") in matched_ids:
+                continue
+            if validation.get("endpoint_url") != endpoint_url:
+                continue
+            if validation.get("category") != category:
+                continue
+            if validation.get("algorithm") != algorithm:
+                continue
+            if not _phase04_validation_evidence_valid(validation, contract, category):
+                continue
+            candidates.append(validation)
+        candidates.sort(key=lambda item: (-float(item.get("confidence", 0.0)), item.get("id", "")))
+        if candidates:
+            chosen = candidates[0]
+            matched_ids.add(chosen["id"])
+            score.true_positives += 1
+            score.per_benchmark[target_id]["detected"] += 1
+            score.confidence_calibration.append(
+                {
+                    "benchmark": target_id,
+                    "expected_min": min_confidence,
+                    "actual": chosen.get("confidence", 0.0),
+                    "meets_threshold": chosen.get("confidence", 0.0) >= min_confidence,
+                }
+            )
+            score.benchmark_verdicts.append(
+                {
+                    "benchmark_id": target_id,
+                    "endpoint_url": endpoint_url,
+                    "status": "matched",
+                    "category": category,
+                    "algorithm": algorithm,
+                }
+            )
+        else:
+            score.false_negatives += 1
+            score.benchmark_verdicts.append(
+                {
+                    "benchmark_id": target_id,
+                    "endpoint_url": endpoint_url,
+                    "status": "missed",
+                    "category": category,
+                    "algorithm": algorithm,
+                }
+            )
+
+    for validation in all_vulnerable:
+        if validation.get("id") in matched_ids:
+            continue
+        score.false_positives += 1
+        score.false_positive_findings.append(validation)
+
+    for target_id in selected_target_ids:
+        mapped_benchmark = targets[target_id]["mapped_benchmark"]
+        for channel in benchmarks[mapped_benchmark].get("detection_channels", []):
+            if channel not in score.per_channel:
+                score.per_channel[channel] = {"expected": 0, "detected": 0}
+            score.per_channel[channel]["expected"] += 1
+            score.per_channel[channel]["detected"] += score.per_benchmark[target_id]["detected"]
+
+    for nc_id in selected_negative_control_ids:
+        nc = negative_controls[nc_id]
+        endpoint_url = canonicalize_endpoint_url(nc["target_url"], nc["endpoint_path"])
+        has_vulnerable = any(
+            validation.get("endpoint_url") == endpoint_url and validation.get("vulnerable")
+            for validation in all_validations
+        )
+        passed = not has_vulnerable
+        score.negative_control_results.append(
+            {"id": nc_id, "name": nc["name"], "passed": passed, "endpoint_url": endpoint_url}
+        )
+        if passed:
+            score.true_negatives += 1
+
+    for report in reports:
+        request_accounting = report.get("request_accounting", {})
+        if request_accounting:
+            budget_reports += 1
+            if request_accounting.get("budget_compliant"):
+                budget_compliant_reports += 1
+        if any(
+            verdict.get("status") == "inconclusive"
+            for verdict in report.get("benchmark_verdicts", [])
+        ):
+            inconclusive_reports += 1
+        ttfv = report.get("summary", {}).get("time_to_first_validation_seconds")
+        if isinstance(ttfv, (int, float)):
+            validation_times.append(float(ttfv))
+
+    score.budget_compliance_rate = (
+        budget_compliant_reports / budget_reports if budget_reports else 0.0
+    )
+    score.inconclusive_rate = inconclusive_reports / len(reports) if reports else 0.0
+    score.mean_time_to_first_validation_seconds = (
+        sum(validation_times) / len(validation_times) if validation_times else 0.0
+    )
+    return score
+
+
+def score_phase05_reports(
+    reports: list[dict[str, Any]],
+    ground_truth_path: str = "benchmarks/ground_truth.yaml",
+    target_ids: list[str] | None = None,
+) -> BenchmarkScore:
+    """Score phase05 operational robustness reports."""
+    gt = load_ground_truth(ground_truth_path)
+    contract = gt.get("phase05_contract", {})
+    suite = gt.get("benchmark_suites", {}).get("phase05", {})
+    targets = gt.get("phase05_targets", {})
+    selected_target_ids = target_ids or list(suite.get("target_ids", []))
+    selected_target_set = set(selected_target_ids)
+
+    score = BenchmarkScore()
+    score.phase05_reports = reports
+    score.total_expected = len(selected_target_ids)
+
+    all_results: list[dict[str, Any]] = []
+    for report in reports:
+        all_results.extend(report.get("operational_results", []))
+
+    matched_ids: set[str] = set()
+    budget_reports = 0
+    budget_compliant_reports = 0
+    inconclusive_reports = 0
+
+    for target_id in selected_target_ids:
+        target = targets[target_id]
+        score.per_benchmark[target_id] = {
+            "name": target["name"],
+            "expected": 1,
+            "detected": 0,
+            "findings": [],
+        }
+        candidates = [
+            result
+            for result in all_results
+            if result.get("target_id") == target_id
+            and result.get("operation") == target["operation"]
+            and result.get("status") == target["expected_status"]
+            and result.get("passed") is True
+            and _phase05_operational_evidence_valid(result, contract)
+        ]
+        candidates.sort(key=lambda item: (-float(item.get("confidence", 0.0)), item.get("id", "")))
+        if candidates:
+            chosen = candidates[0]
+            matched_ids.add(chosen["id"])
+            score.true_positives += 1
+            score.per_benchmark[target_id]["detected"] += 1
+            score.confidence_calibration.append(
+                {
+                    "benchmark": target_id,
+                    "expected_min": 0.8,
+                    "actual": chosen.get("confidence", 0.0),
+                    "meets_threshold": chosen.get("confidence", 0.0) >= 0.8,
+                }
+            )
+            score.benchmark_verdicts.append(
+                {
+                    "benchmark_id": target_id,
+                    "endpoint_url": canonicalize_endpoint_url(
+                        target["target_url"], target["endpoint_path"]
+                    ),
+                    "status": "matched",
+                    "operation": target["operation"],
+                }
+            )
+        else:
+            score.false_negatives += 1
+            score.benchmark_verdicts.append(
+                {
+                    "benchmark_id": target_id,
+                    "endpoint_url": canonicalize_endpoint_url(
+                        target["target_url"], target["endpoint_path"]
+                    ),
+                    "status": "missed",
+                    "operation": target["operation"],
+                }
+            )
+
+    for result in all_results:
+        if result.get("target_id") not in selected_target_set:
+            continue
+        if result.get("id") in matched_ids:
+            continue
+        if result.get("passed") is True:
+            score.false_positives += 1
+            score.false_positive_findings.append(result)
+
+    score.total_detected = score.true_positives + score.false_positives
+    score.per_channel["PHASE05:OPERATIONAL_ROBUSTNESS"] = {
+        "expected": score.total_expected,
+        "detected": score.true_positives,
+    }
+
+    for report in reports:
+        request_accounting = report.get("request_accounting", {})
+        if request_accounting:
+            budget_reports += 1
+            if request_accounting.get("budget_compliant"):
+                budget_compliant_reports += 1
+        if any(
+            verdict.get("status") == "inconclusive"
+            for verdict in report.get("benchmark_verdicts", [])
+        ):
+            inconclusive_reports += 1
+
+    score.budget_compliance_rate = (
+        budget_compliant_reports / budget_reports if budget_reports else 0.0
+    )
+    score.inconclusive_rate = inconclusive_reports / len(reports) if reports else 0.0
     return score
 
 

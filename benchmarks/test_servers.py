@@ -21,6 +21,14 @@ import httpx
 import pytest
 from cryptography import x509
 
+from bbci.phase04 import (
+    PADDING_ORACLE_SOURCE_PLAINTEXT,
+    benchmark_pkcs7_pad_len,
+    expected_hmac,
+    mac_with_prefix,
+    padding_oracle_mutations,
+)
+
 BASE_URL = os.environ.get("BENCHMARK_URL", "http://localhost:9000")
 WEAK_TLS_URL = os.environ.get("BENCHMARK_WEAK_TLS_URL", "https://localhost:9443")
 STRONG_TLS_URL = os.environ.get("BENCHMARK_STRONG_TLS_URL", "https://localhost:9444")
@@ -170,8 +178,10 @@ class TestBm06PaddingOracle:
 
     def _get_valid_ciphertext(self) -> bytes:
         """Get a valid ciphertext from the encryption endpoint."""
-        payload = b"padding oracle test data here!!!!"  # 32 bytes
-        resp = httpx.post(f"{BASE_URL}/api/encrypt-cbc-static", content=payload)
+        resp = httpx.post(
+            f"{BASE_URL}/api/encrypt-cbc-static",
+            content=PADDING_ORACLE_SOURCE_PLAINTEXT,
+        )
         ct = base64.b64decode(resp.json()["ciphertext"])
         iv = base64.b64decode(resp.json()["iv"])
         return iv + ct
@@ -186,14 +196,12 @@ class TestBm06PaddingOracle:
 
     def test_differential_error_responses(self) -> None:
         """Modified ciphertext should produce different error types."""
-        ct = bytearray(self._get_valid_ciphertext())
-
         responses = set()
-        for byte_val in [0x00, 0x01, 0x10, 0xFF]:
-            ct[-1] = byte_val
+        pad_len = benchmark_pkcs7_pad_len(PADDING_ORACLE_SOURCE_PLAINTEXT)
+        for _, mutated in padding_oracle_mutations(self._get_valid_ciphertext(), pad_len=pad_len):
             resp = httpx.post(
                 f"{BASE_URL}/api/decrypt",
-                content=base64.b64encode(bytes(ct)),
+                content=base64.b64encode(mutated),
             )
             responses.add((resp.status_code, resp.json().get("error", "")))
 
@@ -201,6 +209,18 @@ class TestBm06PaddingOracle:
         assert len(responses) >= 2, (
             f"Expected multiple response patterns for padding oracle, got {len(responses)}"
         )
+
+    def test_secure_decrypt_has_uniform_error_responses(self) -> None:
+        responses = set()
+        pad_len = benchmark_pkcs7_pad_len(PADDING_ORACLE_SOURCE_PLAINTEXT)
+        for _, mutated in padding_oracle_mutations(self._get_valid_ciphertext(), pad_len=pad_len):
+            resp = httpx.post(
+                f"{BASE_URL}/api/decrypt-secure",
+                content=base64.b64encode(mutated),
+            )
+            responses.add((resp.status_code, resp.json().get("error", "")))
+
+        assert responses == {(400, "Decryption failed")}
 
 
 @skipif_no_server
@@ -273,6 +293,15 @@ class TestBm10TimingLeak:
         )
         assert resp.status_code in (200, 401)
 
+    def test_noisy_secure_hmac_rejects_invalid_mac(self) -> None:
+        message = "phase05-noisy-timing-probe"
+        invalid_mac = mac_with_prefix(expected_hmac(message), 8)
+        resp = httpx.post(
+            f"{BASE_URL}/api/verify-hmac-noisy",
+            json={"message": message, "mac": invalid_mac},
+        )
+        assert resp.status_code == 401
+
 
 @skipif_no_server
 class TestNegativeControls:
@@ -326,3 +355,29 @@ class TestPhase02DiscoveryFixtures:
         assert "/api/ping" in data["paths"]
         assert data["paths"]["/api/encrypt"]["post"]["x-bbci-surface-kind"] == "encryption_oracle"
         assert data["paths"]["/api/ping"]["get"]["x-bbci-crypto-relevant"] is False
+
+
+@skipif_no_server
+class TestPhase05OperationalFixtures:
+    """Phase05 operational robustness fixtures."""
+
+    def test_rate_limit_fixture_reaches_429_within_budget(self) -> None:
+        statuses = [
+            httpx.get(f"{BASE_URL}/api/rate-limit-token").status_code
+            for _ in range(5)
+        ]
+        assert 429 in statuses
+
+    def test_transient_hash_recovers_after_retry_marker(self) -> None:
+        first = httpx.get(
+            f"{BASE_URL}/api/transient-hash",
+            headers={"X-BBCI-Attempt": "1"},
+        )
+        second = httpx.get(
+            f"{BASE_URL}/api/transient-hash",
+            headers={"X-BBCI-Attempt": "2"},
+        )
+
+        assert first.status_code == 503
+        assert second.status_code == 200
+        assert second.json()["recovered"] is True

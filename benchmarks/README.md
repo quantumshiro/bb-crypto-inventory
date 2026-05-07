@@ -7,6 +7,8 @@ The first stabilized suites are:
 - `phase01`: a URL-scoped benchmark for Recon (Phase 0) and Protocol Layer testing (Phase 1)
 - `phase02`: a base-URL-scoped benchmark for application-surface discovery (Phase 2)
 - `phase03`: a base-URL-scoped benchmark for deterministic misuse classification on discovered application surfaces
+- `phase04`: a base-URL-scoped benchmark for authorized active oracle and timing validation
+- `phase05`: a base-URL-scoped benchmark for operational robustness under limits, retries, and noise
 
 The normative design artifacts are:
 
@@ -19,6 +21,12 @@ The normative design artifacts are:
 - [phase03-spec.md](./phase03-spec.md)
 - [phase03-scoring-spec.md](./phase03-scoring-spec.md)
 - [phase03-report.schema.json](./phase03-report.schema.json)
+- [phase04-spec.md](./phase04-spec.md)
+- [phase04-scoring-spec.md](./phase04-scoring-spec.md)
+- [phase04-report.schema.json](./phase04-report.schema.json)
+- [phase05-spec.md](./phase05-spec.md)
+- [phase05-scoring-spec.md](./phase05-scoring-spec.md)
+- [phase05-report.schema.json](./phase05-report.schema.json)
 - [ground_truth.yaml](./ground_truth.yaml)
 
 ## Standards Alignment
@@ -172,14 +180,54 @@ discovered surfaces that are relevant for misuse classification.
 | C-NC-02 | `/api/hash-strong` | Must not trigger phase03 findings |
 | C-NC-03 | `/api/token-secure` | Must not trigger phase03 findings |
 
+## Phase 4 Active Validation Suite
+
+`phase04` starts from the same authorized application base URL, but it is
+separate from `phase03` because it runs more intrusive active probes.
+
+- **Evaluation mode**: base-URL-scoped active validation
+- **What it scores**: padding-oracle response differentials and HMAC timing leakage
+- **What it does not score**: broad endpoint discovery, Phase03 deterministic misuse classification, or production-safe crawl behavior
+- **Probe rule**: scoring requires behavioral evidence from bounded active probes, not endpoint names or metadata
+
+### Positive Targets
+
+| ID | Endpoint | Expected Finding |
+|----|----------|------------------|
+| A-01 | `/api/decrypt` | `PaddingOracle / AES-128-CBC-PKCS7` |
+| A-02 | `/api/verify-hmac` | `TimingLeak / HMAC-SHA256-non-constant-time` |
+
+### Negative Controls
+
+| ID | Endpoint | Expected Result |
+|----|----------|-----------------|
+| A-NC-01 | `/api/decrypt-secure` | Must not trigger `PaddingOracle` |
+| A-NC-02 | `/api/verify-hmac-secure` | Must not trigger `TimingLeak` |
+
+## Phase 5 Operational Robustness Suite
+
+`phase05` measures whether scanner behavior remains correct under realistic
+operational constraints. The expected output is an operational result, not
+necessarily a vulnerability finding.
+
+- **Evaluation mode**: base-URL-scoped operational behavior checks
+- **What it scores**: rate-limit handling, transient retry recovery, and timing-noise suppression
+- **What it does not score**: new vulnerability classes
+- **Probe rule**: scanners must stop on limits, retry bounded transient failures, and avoid timing false positives on noisy secure controls
+
+### Operational Targets
+
+| ID | Endpoint | Expected Status |
+|----|----------|-----------------|
+| O-01 | `/api/rate-limit-token` | `rate_limit_detected` |
+| O-02 | `/api/transient-hash` | `transient_recovered` |
+| O-03 | `/api/verify-hmac-noisy` | `no_timing_leak` |
+
 ## Full-Suite Backlog
 
-Draft definitions for later suites remain in the repository, but they are not the first suite to stabilize:
-
-- Phase04 active oracle and timing validation
-- later operational robustness suites
-
-Those later suites build on `phase03`; they do not replace it.
+Post-Phase05 work should add broader runtime and deployment coverage without
+weakening the deterministic contracts already fixed in `phase01` through
+`phase05`.
 
 ## Quick Start
 
@@ -201,6 +249,12 @@ python -m benchmarks.runner --target http://localhost:9000 --suite phase02
 
 # Run the stabilized Phase 3 classification suite
 python -m benchmarks.runner --target http://localhost:9000 --suite phase03
+
+# Run the stabilized Phase 4 active-validation suite
+python -m benchmarks.runner --target http://localhost:9000 --suite phase04
+
+# Run the stabilized Phase 5 operational-robustness suite
+python -m benchmarks.runner --target http://localhost:9000 --suite phase05
 
 # Run a single target from that suite
 python -m benchmarks.runner --target http://localhost:9000 --suite phase01 --benchmark BM-09

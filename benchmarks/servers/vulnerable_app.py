@@ -265,6 +265,38 @@ def decrypt_padding_oracle():
         return jsonify({"error": f"Decryption failed: {type(e).__name__}"}), 500
 
 
+@app.route("/api/decrypt-secure", methods=["POST"])
+def decrypt_secure_control():
+    """AES-CBC decryption with uniform errors. Should NOT expose a padding oracle."""
+    data = request.get_data()
+    if not data:
+        return jsonify({"error": "Decryption failed"}), 400
+
+    try:
+        ct = base64.b64decode(data)
+    except Exception:
+        return jsonify({"error": "Decryption failed"}), 400
+
+    if len(ct) < 32:
+        return jsonify({"error": "Decryption failed"}), 400
+
+    iv = ct[:16]
+    ciphertext = ct[16:]
+
+    try:
+        cipher = Cipher(algorithms.AES(AES_KEY), modes.CBC(iv))
+        dec = cipher.decryptor()
+        padded_pt = dec.update(ciphertext) + dec.finalize()
+        unpadder = sym_padding.PKCS7(128).unpadder()
+        plaintext = unpadder.update(padded_pt) + unpadder.finalize()
+        return jsonify({
+            "plaintext": base64.b64encode(plaintext).decode(),
+            "status": "success",
+        })
+    except Exception:
+        return jsonify({"error": "Decryption failed"}), 400
+
+
 # ============================================================
 # BM-07: JWT alg=none
 # ============================================================
@@ -391,6 +423,7 @@ def verify_hmac_timing():
         if provided_mac[i] != expected[i]:
             # Early termination — timing leak!
             return jsonify({"valid": False}), 401
+        time.sleep(0.0005)
         # Simulate slight processing time per byte to amplify timing signal
         _ = hashlib.sha256(message + bytes([i])).digest()
 
@@ -414,6 +447,47 @@ def verify_hmac_secure():
     if hmac.compare_digest(data["mac"], expected):
         return jsonify({"valid": True}), 200
     return jsonify({"valid": False}), 401
+
+
+@app.route("/api/verify-hmac-noisy", methods=["POST"])
+def verify_hmac_noisy_secure():
+    """Constant-time HMAC verification with deterministic jitter."""
+    data = request.json
+    if not data or "message" not in data or "mac" not in data:
+        return jsonify({"error": "Provide 'message' and 'mac'"}), 400
+
+    message = data["message"].encode()
+    expected = hmac.new(HMAC_SECRET, message, hashlib.sha256).hexdigest()
+    provided_mac = data["mac"]
+    jitter_seed = hashlib.sha256((provided_mac + data["message"]).encode()).digest()[0]
+    time.sleep((jitter_seed % 4) * 0.0003)
+
+    if hmac.compare_digest(provided_mac, expected):
+        return jsonify({"valid": True}), 200
+    return jsonify({"valid": False}), 401
+
+
+_rate_limit_counter = 0
+
+
+@app.route("/api/rate-limit-token", methods=["GET"])
+def rate_limit_token():
+    """Synthetic rate-limit endpoint for operational robustness testing."""
+    global _rate_limit_counter
+    _rate_limit_counter += 1
+    if _rate_limit_counter >= 3:
+        return jsonify({"error": "rate limited", "retry_after": 1}), 429
+    return jsonify({"token": os.urandom(16).hex(), "type": "session"})
+
+
+@app.route("/api/transient-hash", methods=["GET"])
+def transient_hash():
+    """Synthetic transient failure endpoint for operational robustness testing."""
+    attempt = request.headers.get("X-BBCI-Attempt", "1")
+    if attempt == "1":
+        return jsonify({"error": "temporary unavailable"}), 503
+    digest = hashlib.sha256(b"phase05-transient-hash").hexdigest()
+    return jsonify({"hash": digest, "recovered": True})
 
 
 # ============================================================

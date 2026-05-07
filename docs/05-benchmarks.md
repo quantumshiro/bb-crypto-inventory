@@ -2,7 +2,7 @@
 
 ## 5.1 基本方針
 
-最終的には Phase 0-3 を含む包括的なブラックボックス暗号インベントリベンチマークを目指すが、**最初に固定すべきなのは Phase 0+1 の URL-scoped benchmark と、続く Phase 2 の discovery benchmark** である。
+最終的には Phase01-05 を含む包括的なブラックボックス暗号インベントリベンチマークを目指すが、**最初に固定すべきなのは Phase 0+1 の URL-scoped benchmark と、続く Phase 2 の discovery benchmark** である。
 
 理由は次の通り：
 
@@ -22,7 +22,8 @@
 | **Phase01 MVP** | Recon + Protocol Layer | まず安定した基準スイートを作る |
 | **Phase02 MVP** | App surface discovery | 暗号関連 endpoint を見つけて分類できるかを測る |
 | **Phase03 MVP** | App misuse classification | 見つけた surface を bounded probe で誤分類なく判断できるかを測る |
-| Phase04 Suite | Oracle / Timing | 許諾環境向けの深い動的検査を測る |
+| **Phase04 MVP** | Oracle / Timing | 許諾環境向けの深い動的検査を測る |
+| **Phase05 MVP** | Operational robustness | rate limit、transient failure、noise 下での安全な挙動を測る |
 
 ## 5.2 Phase01 MVP の評価境界
 
@@ -338,22 +339,59 @@ Phase03 が採点するのは次の能力である。
 Phase03 は **classification suite** であり、padding oracle や timing leak のような
 高回数・高リスクの active validation は含めない。
 
-## 5.10 後続フェーズ
+## 5.10 Phase04 Active Validation Suite
 
-Phase03 の後に、以下を別 suite として追加する：
+Phase04 は、Phase03 であえて外した高回数・高リスクの active validation を
+独立 suite として採点する。
 
-1. **Phase4 Active Validation Suite**
-   - Padding Oracle
-   - Timing leak
+- positive target: `A-01` `/api/decrypt` は `PaddingOracle / AES-128-CBC-PKCS7`
+- positive target: `A-02` `/api/verify-hmac` は `TimingLeak / HMAC-SHA256-non-constant-time`
+- negative control: `A-NC-01` `/api/decrypt-secure` は `PaddingOracle` を出してはいけない
+- negative control: `A-NC-02` `/api/verify-hmac-secure` は `TimingLeak` を出してはいけない
+
+Phase04 の scoring は、endpoint 名だけでは成立しない。Padding Oracle は valid ciphertext と
+mutated ciphertext の応答差分クラスタを evidence とし、Timing Leak は prefix 長ごとの
+median latency 差分を evidence とする。
+
+### Phase04 request budget
+
+| 種類 | 推奨上限 |
+|------|---------|
+| Padding probes | 16 req |
+| Timing probes | 72 req |
+| 合計 | 96 actions / base URL 程度 |
+
+## 5.11 Phase05 Operational Robustness Suite
+
+Phase05 は脆弱性そのものではなく、scanner が運用制約下で誤動作しないかを採点する。
+
+- `O-01`: `/api/rate-limit-token` で HTTP `429` を観測したら停止し、`rate_limit_detected` とする
+- `O-02`: `/api/transient-hash` で初回 HTTP `503` 後に1回だけ retry して成功し、`transient_recovered` とする
+- `O-03`: `/api/verify-hmac-noisy` で timing threshold を満たさないことを確認し、`no_timing_leak` とする
+
+Phase05 は operational result を採点する suite であり、`O-03` の noisy secure timing control に
+脆弱性 finding を出した場合は false positive として扱う。
+
+### Phase05 request budget
+
+| 種類 | 推奨上限 |
+|------|---------|
+| Rate-limit probes | 5 req |
+| Transient probes | 2 req |
+| Noise probes | 32 req |
+| 合計 | 48 actions / base URL 程度 |
+
+## 5.12 後続フェーズ
 
 この順序にすることで、まず「URL を入れれば edge posture は安定して測れる」こと、
 「base URL を入れれば relevant surface を安定抽出できる」こと、
 「bounded probe で主要 misuses を安定分類できる」ことを benchmark として成立させた上で、
-より難しい runtime 系に進める。
+「許諾環境で runtime oracle / timing を検証できる」こと、
+「rate limit や noise に対して安全に振る舞える」ことまで段階的に固定できる。
 
-## 5.11 仕様書
+## 5.13 仕様書
 
-Phase01 / Phase02 / Phase03 の完全設計は以下の artifact 群で構成する。
+Phase01 / Phase02 / Phase03 / Phase04 / Phase05 の完全設計は以下の artifact 群で構成する。
 
 - [benchmarks/phase01-spec.md](../benchmarks/phase01-spec.md)
   suite boundary、input contract、normalization、evidence contract
@@ -373,5 +411,17 @@ Phase01 / Phase02 / Phase03 の完全設計は以下の artifact 群で構成す
   classification precision/recall、negative control suppression、TTFC、duplicate policy
 - [benchmarks/phase03-report.schema.json](../benchmarks/phase03-report.schema.json)
   実装が出力すべき classification report schema
+- [benchmarks/phase04-spec.md](../benchmarks/phase04-spec.md)
+  active validation boundary、probe semantics、evidence contract
+- [benchmarks/phase04-scoring-spec.md](../benchmarks/phase04-scoring-spec.md)
+  active validation precision/recall、negative control suppression、budget compliance
+- [benchmarks/phase04-report.schema.json](../benchmarks/phase04-report.schema.json)
+  実装が出力すべき active validation report schema
+- [benchmarks/phase05-spec.md](../benchmarks/phase05-spec.md)
+  operational robustness boundary、retry/limit/noise semantics、evidence contract
+- [benchmarks/phase05-scoring-spec.md](../benchmarks/phase05-scoring-spec.md)
+  operational recall、false operational failures、budget compliance
+- [benchmarks/phase05-report.schema.json](../benchmarks/phase05-report.schema.json)
+  実装が出力すべき operational robustness report schema
 - [benchmarks/ground_truth.yaml](../benchmarks/ground_truth.yaml)
   target-specific ground truth と machine-readable contract
